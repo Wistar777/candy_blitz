@@ -21,7 +21,7 @@ const DISCRIMINATORS = {
 // Score & session tracking
 let lastTxSignature = null;
 let scoreHistory = [];
-let playerAccountInitialized = false;
+let playerAccountInitializedFor = null;
 
 // Active game session — tracks swaps locally
 let gameSession = {
@@ -399,13 +399,16 @@ export function getSessionSwapCount() {
 // ===== Initialize Player Account (PDA) =====
 
 async function ensurePlayerAccount() {
-    if (playerAccountInitialized || !wallet || !solanaConnection) return;
+    if (!wallet || !solanaConnection) return;
+
+    const walletStr = wallet.toString();
+    if (playerAccountInitializedFor === walletStr) return;
 
     const playerPDA = getPlayerPDA(wallet);
     try {
         const accountInfo = await solanaConnection.getAccountInfo(playerPDA);
         if (accountInfo) {
-            playerAccountInitialized = true;
+            playerAccountInitializedFor = walletStr;
             console.log(`[Anchor] Player PDA exists: ${playerPDA.toString()}`);
             return;
         }
@@ -436,7 +439,8 @@ async function ensurePlayerAccount() {
         const sig = await solanaConnection.sendRawTransaction(signed.serialize());
         await solanaConnection.confirmTransaction(sig, 'confirmed');
 
-        playerAccountInitialized = true;
+        playerAccountInitializedFor = wallet.toString();
+        // Fallback catch if signature confirmation fails
         console.log(`[Anchor] ✅ Player account created: ${sig}`);
     } catch (err) {
         console.error('[Anchor] Player account creation failed:', err);
