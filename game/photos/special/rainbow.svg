@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <linearGradient id="rainbow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff0000"/>
+      <stop offset="17%" stop-color="#ff8800"/>
+      <stop offset="33%" stop-color="#ffff00"/>
+      <stop offset="50%" stop-color="#00ff00"/>
+      <stop offset="67%" stop-color="#0088ff"/>
+      <stop offset="83%" stop-color="#8800ff"/>
+      <stop offset="100%" stop-color="#ff00ff"/>
+    </linearGradient>
+  </defs>
+  <!-- Outer glow -->
+  <circle cx="50" cy="50" r="38" fill="none" stroke="url(#rainbow)" stroke-width="4" opacity="0.4" filter="url(#glow)"/>
+  <!-- Star shape -->
+  <polygon points="50,12 58,38 85,38 63,55 72,82 50,66 28,82 37,55 15,38 42,38" 
+           fill="url(#rainbow)" filter="url(#glow)"/>
+  <!-- Inner white glow -->
+  <polygon points="50,25 55,42 72,42 58,52 63,70 50,59 37,70 42,52 28,42 45,42" 
+           fill="#fff" opacity="0.5"/>
+  <!-- Center -->
+  <circle cx="50" cy="48" r="6" fill="#fff" opacity="0.9"/>
+</svg>

@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>🍬 Candy Blitz — Match-3 on Solana</title>
+    <meta name="description"
+        content="A fully on-chain Candy Crush game powered by MagicBlock Ephemeral Rollups on Solana">
+    <meta name="theme-color" content="#ff1493">
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🍬</text></svg>">
+    <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="game-main.css">
+    <link rel="preload" href="photos/special/rocket-h.svg" as="image">
+    <link rel="preload" href="photos/special/rocket-v.svg" as="image">
+    <link rel="preload" href="photos/special/bomb.svg" as="image">
+    <link rel="preload" href="photos/special/rainbow.svg" as="image">
+    <link rel="preload" href="photos/special/lightning.svg" as="image">
+</head>
+
+<body>
+    <!-- Wallet Reconnect Overlay (hidden by default, shown via inline script if wallet was connected) -->
+    <div id="walletReconnectOverlay" style="
+        display: none;
+        position: fixed; inset: 0; z-index: 9999;
+        background: rgba(10, 10, 25, 0.92);
+        backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+        justify-content: center; align-items: center; flex-direction: column; gap: 20px;
+    ">
+        <div style="
+            width: 56px; height: 56px;
+            border: 4px solid rgba(153, 69, 255, 0.2);
+            border-top-color: #9945ff;
+            border-radius: 50%;
+            animation: reconnectSpin 0.8s linear infinite;
+        "></div>
+        <p style="
+            color: #e0e0ff; font-family: 'Comfortaa', sans-serif;
+            font-size: 1.1rem; font-weight: 600; text-align: center;
+        ">Reconnecting wallet<span id="reconnectDots">...</span></p>
+        <p style="
+            color: rgba(255,255,255,0.4); font-family: 'Comfortaa', sans-serif;
+            font-size: 0.75rem;
+        ">Please wait</p>
+    </div>
+    <style>
+        @keyframes reconnectSpin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+
+    <!-- Instant screen swap + overlay if wallet was previously connected -->
+    <script>
+        if (localStorage.getItem('candyBlitz_walletProvider')) {
+            document.addEventListener('DOMContentLoaded', function () {
+                var splash = document.getElementById('startScreen');
+                var map = document.getElementById('mapScreen');
+                if (splash) splash.classList.add('hidden');
+                if (map) map.classList.remove('hidden');
+                // Show the blocking reconnect overlay
+                var overlay = document.getElementById('walletReconnectOverlay');
+                if (overlay) overlay.style.display = 'flex';
+            });
+        }
+    </script>
+
+    <!-- Floating Hearts -->
+    <div class="floating-hearts" id="floatingHearts"></div>
+
+    <!-- Start Screen - Candy Splash -->
+    <div class="screen" id="startScreen">
+        <div class="candy-splash">
+            <div class="splash-candies">🍬🍭🍫🍩🧁🍪</div>
+            <h1 class="splash-title">Candy Blitz</h1>
+            <p class="splash-sub">Match-3 on Solana ⚡</p>
+            <p class="splash-desc">Every swap is an on-chain transaction — powered by MagicBlock Ephemeral Rollups</p>
+            <button class="btn btn-wallet" id="walletBtn" onclick="openProfile()">🔗 Connect Wallet</button>
+            <button class="btn btn-gold splash-btn hidden" id="playBtn" onclick="showMap()">🎮 Play</button>
+        </div>
+    </div>
+
+    <!-- Map Screen -->
+    <div class="screen card hidden" id="mapScreen">
+        <button class="settings-gear" onclick="openSettings()">⚙️</button>
+        <button class="wallet-gear" id="walletBtnMap" onclick="openProfile()">🔗</button>
+        <div class="map-title">
+            <h2>🗺️ Candy World</h2>
+            <p class="subtitle">Choose a level</p>
+        </div>
+        <div class="map-scroll" id="mapScroll">
+            <div class="map-path" id="mapPath"></div>
+        </div>
+        <div id="progressText" style="font-size: 0.9rem; margin-top: 10px;"></div>
+        <button class="btn btn-small" onclick="openLeaderboard()" style="margin-top: 10px;">🏆 Leaderboard</button>
+    </div>
+
+    <!-- Game Screen -->
+    <div class="screen hidden" id="gameScreen">
+        <div class="game-top-bar">
+            <button class="back-btn" onclick="backToMap()">←</button>
+            <div class="game-top-info">
+                <div class="level-header" id="levelHeader">🍫 Chocolate Factory</div>
+                <div class="goal-text" id="goalText">🎯 Goal: 3000 points</div>
+            </div>
+            <div class="game-top-spacer"></div>
+        </div>
+
+        <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+
+        <div class="header">
+            <div class="stat">
+                <div class="stat-label">Score</div>
+                <div class="stat-value" id="score">0</div>
+            </div>
+            <div class="stat timer" id="timerBox">
+                <div class="stat-label">Time</div>
+                <div class="stat-value" id="timer">2:00</div>
+            </div>
+            <div class="stat">
+                <div class="stat-label">Best</div>
+                <div class="stat-value" id="bestScoreDisplay">—</div>
+            </div>
+        </div>
+
+        <div class="board-container">
+            <div class="board" id="board"></div>
+        </div>
+
+        <div class="game-bottom-bar">
+            <button class="shuffle-btn" id="shuffleBtn" onclick="manualShuffle()">🔀</button>
+            <button class="music-btn" id="musicBtn" onclick="toggleMusic()">🔊</button>
+        </div>
+    </div>
+
+    <!-- Level Complete Screen -->
+    <div class="screen card hidden" id="winScreen">
+        <div class="hearts win-hearts">🎉</div>
+        <h1>Level Complete!</h1>
+        <div id="winStars" class="win-stars-container"></div>
+        <div class="result">
+            <div class="result-score" id="winScore">2500</div>
+            <div class="result-msg" id="winMsg"></div>
+        </div>
+        <div class="star-thresholds">
+            <span>⭐ 1500</span>
+            <span>⭐⭐ 3000</span>
+            <span>⭐⭐⭐ 4500</span>
+        </div>
+        <div class="win-candy-icon" style="font-size: 4rem; margin: 1rem 0;">🍬</div>
+        <p class="baby-message" id="winBabyMsg"></p>
+        <button class="btn btn-gold" onclick="showMap()">To Map 🗺️</button>
+    </div>
+
+    <!-- Level Failed Screen -->
+    <div class="screen card hidden" id="loseScreen">
+        <div class="hearts">😢</div>
+        <h1>Not Enough Points</h1>
+        <div class="result">
+            <div class="result-score" id="loseScore">1500</div>
+            <div class="result-msg">Needed <span id="loseGoal">1500</span></div>
+        </div>
+        <div style="font-size: 4rem; margin: 1rem 0;">💔</div>
+        <p class="baby-message" id="loseBabyMsg"></p>
+        <button class="btn" onclick="retryLevel()">Retry 🔄</button>
+        <button class="btn btn-small" onclick="showMap()">To Map</button>
+    </div>
+
+    <!-- Final Congratulations Screen -->
+    <div class="screen card hidden" id="congratsScreen">
+        <div class="hearts win-hearts">🏆</div>
+        <h1 class="congrats-title">Congratulations!</h1>
+        <p class="congrats-subtitle">All levels completed!</p>
+        <div style="font-size: 5rem; margin: 1rem 0;">🍬🏆🍬</div>
+        <p class="congrats-message" id="congratsMsg"></p>
+        <div class="congrats-stats">
+            <div class="congrats-stat">
+                <span class="congrats-stat-value" id="congratsTotalStars">0</span>
+                <span class="congrats-stat-label">⭐ Stars</span>
+            </div>
+            <div class="congrats-stat">
+                <span class="congrats-stat-value" id="congratsTotalScore">0</span>
+                <span class="congrats-stat-label">🎯 Points</span>
+            </div>
+        </div>
+        <p style="color: #14F195; font-size: 0.9rem; margin: 1rem 0 0.5rem;">🏆 Your score is saved on Solana! Check the
+            Leaderboard to see your rank.</p>
+        <button class="btn btn-gold" onclick="openLeaderboard()"
+            style="margin-bottom: 0.5rem; background: linear-gradient(135deg, #9945FF, #14F195);">View Leaderboard
+            📊</button>
+        <button class="btn btn-gold" onclick="showMap()">To Map 🗺️</button>
+    </div>
+
+    <!-- Settings Screen -->
+    <div class="screen card hidden" id="settingsScreen" style="position: relative;">
+        <button class="back-btn" onclick="showMap()"
+            style="position: absolute; top: 15px; left: 15px; z-index: 10;">←</button>
+        <div class="hearts">⚙️</div>
+        <h1>Settings</h1>
+        <div class="settings-panel">
+            <div class="settings-item">
+                <label class="settings-label" for="volumeSlider">🎵 Music Volume</label>
+                <div class="volume-control">
+                    <span class="volume-icon" id="volumeIcon">🔊</span>
+                    <input type="range" id="volumeSlider" class="volume-slider" min="0" max="100" value="30"
+                        oninput="changeVolume(this.value)">
+                    <span class="volume-value" id="volumeValue">30%</span>
+                </div>
+            </div>
+            <div class="settings-divider"></div>
+            <div class="settings-item">
+                <label class="settings-label" for="sfxSlider">🔊 SFX Volume</label>
+                <div class="volume-control">
+                    <span class="volume-icon" id="sfxIcon">🔊</span>
+                    <input type="range" id="sfxSlider" class="volume-slider" min="0" max="100" value="70"
+                        oninput="changeSfxVolume(this.value)">
+                    <span class="volume-value" id="sfxValue">70%</span>
+                </div>
+            </div>
+            <div class="settings-divider"></div>
+            <div class="settings-item">
+                <label class="settings-label">💡 Hints</label>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="hintToggle" checked onchange="toggleHints(this.checked)">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div class="settings-divider"></div>
+            <div class="settings-item">
+                <button class="btn-reset" id="resetBtn" onclick="resetProgress()">🗑️ Reset Progress</button>
+                <p class="settings-hint" style="color: #ff4d4d;">All stars and scores will be deleted</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leaderboard Screen -->
+    <div class="screen card hidden" id="leaderboardScreen" style="position: relative;">
+        <button class="back-btn" onclick="showMap()"
+            style="position: absolute; top: 15px; left: 15px; z-index: 10;">←</button>
+        <div class="hearts">🏆</div>
+        <h1>Leaderboard</h1>
+        <p class="subtitle" style="margin-bottom: 15px;">On-chain scores via MagicBlock ER</p>
+        <div class="leaderboard-badge">
+            <span class="badge-dot"></span>
+            <span>Solana Devnet</span>
+        </div>
+        <div class="leaderboard-table" id="leaderboardTable">
+            <div class="lb-header">
+                <span class="lb-rank">#</span>
+                <span class="lb-player">Player</span>
+                <span class="lb-score">Score</span>
+                <span class="lb-stars">Games</span>
+            </div>
+            <div class="lb-row lb-gold">
+                <span class="lb-rank">🥇</span>
+                <span class="lb-player">Candy..Master</span>
+                <span class="lb-score">24,500</span>
+                <span class="lb-stars">⭐⭐⭐</span>
+            </div>
+            <div class="lb-row lb-silver">
+                <span class="lb-rank">🥈</span>
+                <span class="lb-player">Sweet..Tooth</span>
+                <span class="lb-score">18,200</span>
+                <span class="lb-stars">⭐⭐⭐</span>
+            </div>
+            <div class="lb-row lb-bronze">
+                <span class="lb-rank">🥉</span>
+                <span class="lb-player">Sugar..Rush</span>
+                <span class="lb-score">15,800</span>
+                <span class="lb-stars">⭐⭐</span>
+            </div>
+            <div class="lb-row">
+                <span class="lb-rank">4</span>
+                <span class="lb-player">Lollipop..Pop</span>
+                <span class="lb-score">12,100</span>
+                <span class="lb-stars">⭐⭐</span>
+            </div>
+            <div class="lb-row">
+                <span class="lb-rank">5</span>
+                <span class="lb-player">Choco..Late</span>
+                <span class="lb-score">9,500</span>
+                <span class="lb-stars">⭐</span>
+            </div>
+        </div>
+        <p class="lb-footer" style="color: #ff4d4d;">Connect wallet to see your rank</p>
+    </div>
+
+    <script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js"></script>
+    <script type="module" src="game-main.js"></script>
+</body>
+
+</html>

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <linearGradient id="boltGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fff"/>
+      <stop offset="30%" stop-color="#ffee00"/>
+      <stop offset="70%" stop-color="#ffcc00"/>
+      <stop offset="100%" stop-color="#ff9900"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="outerGlow">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <!-- Outer glow -->
+  <polygon points="55,5 42,40 58,40 35,95 65,50 48,50 68,12" fill="#ffcc00" opacity="0.35" filter="url(#outerGlow)"/>
+  <!-- Main bolt -->
+  <polygon points="55,8 44,42 58,42 38,92 62,48 48,48 65,14" fill="url(#boltGrad)" stroke="#ff8800" stroke-width="1.5" stroke-linejoin="round" filter="url(#glow)"/>
+  <!-- Inner highlight -->
+  <polygon points="54,18 48,42 56,42 44,78 57,50 50,50 60,22" fill="#fff" opacity="0.6"/>
+  <!-- Small sparks -->
+  <circle cx="35" cy="60" r="3" fill="#ffee00" opacity="0.7" filter="url(#glow)"/>
+  <circle cx="65" cy="30" r="2.5" fill="#fff" opacity="0.8" filter="url(#glow)"/>
+  <circle cx="30" cy="45" r="2" fill="#ffcc00" opacity="0.6" filter="url(#glow)"/>
+  <circle cx="70" cy="55" r="2" fill="#ffee00" opacity="0.5" filter="url(#glow)"/>
+</svg>

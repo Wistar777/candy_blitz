@@ -1,0 +1,36 @@
+# Dependencies
+web/
+node_modules/
+node_modules/
+.vite/
+
+# Anchor build artifacts
+candy_blitz/target/
+candy_blitz/.anchor/
+
+# Deploy keypair (NEVER commit this!)
+**/deploy/*-keypair.json
+*.keypair
+
+# Solana wallet keys
+*.json
+!package.json
+!manifest.json
+!vercel.json
+!Cargo.lock
+!tsconfig.json
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*

@@ -1,0 +1,21 @@
+[package]
+name = "candy-blitz"
+version = "0.1.0"
+description = "Candy Blitz — On-chain Match-3 game with MagicBlock Ephemeral Rollups"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "candy_blitz"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+
+[dependencies]
+anchor-lang = "0.32.0"
+ephemeral-rollups-sdk = "0.8.5"

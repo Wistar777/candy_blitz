@@ -1,0 +1,8 @@
+{
+  "name": "love-match-game",
+  "version": "1.0.0",
+  "description": "Valentine's Day Match-3 Game for Sabina",
+  "scripts": {
+    "start": "npx serve ."
+  }
+}
