@@ -754,6 +754,15 @@ h2 {
     -ms-user-select: none;
 }
 
+.tile.hole {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    pointer-events: none;
+    opacity: 0;
+    cursor: default;
+}
+
 .tile::before {
     content: '';
     position: absolute;

@@ -161,6 +161,7 @@ let currentCandies = [];
 let currentGoal = 3000;
 let currentTime = 120;
 let board = [];
+let boardMask = null; // null = full grid, or 2D array of 0/1
 let score = 0;
 let timeLeft = 120;
 let timerInterval = null;
@@ -169,6 +170,12 @@ let busy = false;
 let combo = 0;
 let gameEnded = false;
 let shuffleUsed = false;
+
+// Board mask helper — returns true if cell is a hole (unplayable)
+function isHole(r, c) {
+    if (!boardMask) return false;
+    return !boardMask[r][c];
+}
 
 // Diff-based rendering
 let tileElements = [];
@@ -792,14 +799,20 @@ function retryLevel() {
 // ===== BOARD LOGIC =====
 function initBoard() {
     const types = LEVELS[currentLevelIndex].types;
+    boardMask = LEVELS[currentLevelIndex].mask || null;
     board = [];
     specials = [];
     for (let r = 0; r < GRID; r++) {
         board[r] = [];
         specials[r] = [];
         for (let c = 0; c < GRID; c++) {
-            board[r][c] = Math.floor(Math.random() * types);
-            specials[r][c] = null;
+            if (isHole(r, c)) {
+                board[r][c] = -1; // hole marker
+                specials[r][c] = null;
+            } else {
+                board[r][c] = Math.floor(Math.random() * types);
+                specials[r][c] = null;
+            }
         }
     }
     // Remove initial matches
@@ -807,7 +820,9 @@ function initBoard() {
     while (getMatches().length > 0 && attempts < 100) {
         for (let r = 0; r < GRID; r++) {
             for (let c = 0; c < GRID; c++) {
-                board[r][c] = Math.floor(Math.random() * types);
+                if (!isHole(r, c)) {
+                    board[r][c] = Math.floor(Math.random() * types);
+                }
             }
         }
         attempts++;
@@ -836,11 +851,14 @@ function createBoardDOM() {
             tile.dataset.r = r;
             tile.dataset.c = c;
 
-            // Click handler
-            tile.addEventListener('click', () => clickTile(r, c));
-
-            // Touch handlers for swipe
-            setupTileTouch(tile, r, c);
+            if (isHole(r, c)) {
+                tile.classList.add('hole');
+            } else {
+                // Click handler
+                tile.addEventListener('click', () => clickTile(r, c));
+                // Touch handlers for swipe
+                setupTileTouch(tile, r, c);
+            }
 
             el.appendChild(tile);
             tileElements[r][c] = tile;
@@ -856,6 +874,7 @@ function updateBoard(animated) {
         for (let c = 0; c < GRID; c++) {
             const tile = tileElements[r][c];
             if (!tile) continue;
+            if (isHole(r, c)) continue; // skip holes
             const type = board[r][c];
 
             if (previousBoard[r][c] !== type) {
@@ -944,7 +963,7 @@ function setupTileTouch(tile, r, c) {
 
 // ===== TILE INTERACTION =====
 function clickTile(r, c) {
-    if (busy) return;
+    if (busy || isHole(r, c)) return;
     clearHints();
     resetHintTimer();
 
@@ -1146,7 +1165,8 @@ function getMatches() {
     for (let r = 0; r < GRID; r++) {
         for (let c = 0; c < GRID - 2; c++) {
             const t = board[r][c];
-            if (t !== null && board[r][c + 1] === t && board[r][c + 2] === t) {
+            if (t === null || t === -1) continue;
+            if (board[r][c + 1] === t && board[r][c + 2] === t) {
                 let end = c + 2;
                 while (end < GRID - 1 && board[r][end + 1] === t) end++;
                 for (let i = c; i <= end; i++) matched.add(`${r},${i}`);
@@ -1157,7 +1177,8 @@ function getMatches() {
     for (let c = 0; c < GRID; c++) {
         for (let r = 0; r < GRID - 2; r++) {
             const t = board[r][c];
-            if (t !== null && board[r + 1][c] === t && board[r + 2][c] === t) {
+            if (t === null || t === -1) continue;
+            if (board[r + 1][c] === t && board[r + 2][c] === t) {
                 let end = r + 2;
                 while (end < GRID - 1 && board[end + 1][c] === t) end++;
                 for (let i = r; i <= end; i++) matched.add(`${i},${c}`);
@@ -1168,7 +1189,8 @@ function getMatches() {
     for (let r = 0; r < GRID - 1; r++) {
         for (let c = 0; c < GRID - 1; c++) {
             const t = board[r][c];
-            if (t !== null && board[r][c + 1] === t && board[r + 1][c] === t && board[r + 1][c + 1] === t) {
+            if (t === null || t === -1) continue;
+            if (board[r][c + 1] === t && board[r + 1][c] === t && board[r + 1][c + 1] === t) {
                 matched.add(`${r},${c}`);
                 matched.add(`${r},${c + 1}`);
                 matched.add(`${r + 1},${c}`);
@@ -1190,7 +1212,7 @@ function findMatchGroups() {
         let c = 0;
         while (c < GRID) {
             const t = board[r][c];
-            if (t === null) { c++; continue; }
+            if (t === null || t === -1) { c++; continue; }
             let end = c;
             while (end < GRID - 1 && board[r][end + 1] === t) end++;
             if (end - c + 1 >= 3) {
@@ -1206,7 +1228,7 @@ function findMatchGroups() {
         let r = 0;
         while (r < GRID) {
             const t = board[r][c];
-            if (t === null) { r++; continue; }
+            if (t === null || t === -1) { r++; continue; }
             let end = r;
             while (end < GRID - 1 && board[end + 1][c] === t) end++;
             if (end - r + 1 >= 3) {
@@ -1221,7 +1243,8 @@ function findMatchGroups() {
     for (let r = 0; r < GRID - 1; r++) {
         for (let c = 0; c < GRID - 1; c++) {
             const t = board[r][c];
-            if (t !== null && board[r][c + 1] === t && board[r + 1][c] === t && board[r + 1][c + 1] === t) {
+            if (t === null || t === -1) continue;
+            if (board[r][c + 1] === t && board[r + 1][c] === t && board[r + 1][c + 1] === t) {
                 groups.push({
                     cells: [{ r, c }, { r, c: c + 1 }, { r: r + 1, c }, { r: r + 1, c: c + 1 }],
                     len: 4, dir: 'square'
@@ -1443,18 +1466,18 @@ async function processMatches(swapPos) {
 function collectSpecialEffect(r, c, type, clearedSet) {
     switch (type) {
         case 'rocket-h':
-            for (let cc = 0; cc < GRID; cc++) clearedSet.add(`${r},${cc}`);
+            for (let cc = 0; cc < GRID; cc++) if (!isHole(r, cc)) clearedSet.add(`${r},${cc}`);
             spawnRocketTrail(r, c, 'h');
             break;
         case 'rocket-v':
-            for (let rr = 0; rr < GRID; rr++) clearedSet.add(`${rr},${c}`);
+            for (let rr = 0; rr < GRID; rr++) if (!isHole(rr, c)) clearedSet.add(`${rr},${c}`);
             spawnRocketTrail(r, c, 'v');
             break;
         case 'bomb':
             for (let dr = -1; dr <= 1; dr++) {
                 for (let dc = -1; dc <= 1; dc++) {
                     const nr = r + dr, nc = c + dc;
-                    if (nr >= 0 && nr < GRID && nc >= 0 && nc < GRID) clearedSet.add(`${nr},${nc}`);
+                    if (nr >= 0 && nr < GRID && nc >= 0 && nc < GRID && !isHole(nr, nc)) clearedSet.add(`${nr},${nc}`);
                 }
             }
             spawnBombShockwave(r, c);
@@ -1475,7 +1498,7 @@ function collectSpecialEffect(r, c, type, clearedSet) {
             const candidates = [];
             for (let rr = 0; rr < GRID; rr++) {
                 for (let cc = 0; cc < GRID; cc++) {
-                    if (board[rr][cc] !== null && !(rr === r && cc === c)) candidates.push(`${rr},${cc}`);
+                    if (board[rr][cc] !== null && board[rr][cc] !== -1 && !(rr === r && cc === c)) candidates.push(`${rr},${cc}`);
                 }
             }
             for (let i = candidates.length - 1; i > 0; i--) {
@@ -1709,23 +1732,26 @@ async function activateSpecialCombo(r1, c1, r2, c2, s1, s2) {
 // ===== GRAVITY & FILL HELPERS =====
 function doGravityAndFill() {
     for (let c = 0; c < GRID; c++) {
-        let empty = GRID - 1;
+        // Collect playable positions in this column (bottom to top)
+        const playable = [];
         for (let r = GRID - 1; r >= 0; r--) {
-            if (board[r][c] !== null) {
-                if (r !== empty) {
-                    board[empty][c] = board[r][c];
-                    specials[empty][c] = specials[r][c];
-                    board[r][c] = null;
-                    specials[r][c] = null;
-                }
-                empty--;
+            if (!isHole(r, c)) playable.push(r);
+        }
+        // Collect existing candies in column (bottom to top)
+        const candies = [];
+        for (const r of playable) {
+            if (board[r][c] !== null && board[r][c] !== -1) {
+                candies.push({ val: board[r][c], sp: specials[r][c] });
             }
         }
-    }
-    const types = LEVELS[currentLevelIndex].types;
-    for (let c = 0; c < GRID; c++) {
-        for (let r = 0; r < GRID; r++) {
-            if (board[r][c] === null) {
+        // Place candies from bottom, fill rest with new
+        const types = LEVELS[currentLevelIndex].types;
+        for (let i = 0; i < playable.length; i++) {
+            const r = playable[i];
+            if (i < candies.length) {
+                board[r][c] = candies[i].val;
+                specials[r][c] = candies[i].sp;
+            } else {
                 board[r][c] = Math.floor(Math.random() * types);
                 specials[r][c] = null;
             }
@@ -1767,9 +1793,10 @@ function findPossibleMove() {
 
     for (let r = 0; r < GRID; r++) {
         for (let c = 0; c < GRID; c++) {
+            if (isHole(r, c)) continue;
             const neighbors = [];
-            if (c < GRID - 1) neighbors.push({ r2: r, c2: c + 1 });
-            if (r < GRID - 1) neighbors.push({ r2: r + 1, c2: c });
+            if (c < GRID - 1 && !isHole(r, c + 1)) neighbors.push({ r2: r, c2: c + 1 });
+            if (r < GRID - 1 && !isHole(r + 1, c)) neighbors.push({ r2: r + 1, c2: c });
 
             for (const n of neighbors) {
                 swap(r, c, n.r2, n.c2);
@@ -1812,19 +1839,19 @@ function shuffleBoard() {
     const types = LEVELS[currentLevelIndex].types;
     let attempts = 0;
 
-    // Clear all specials when shuffling
+    // Clear all specials when shuffling (only playable cells)
     for (let r = 0; r < GRID; r++) {
         for (let c = 0; c < GRID; c++) {
-            specials[r][c] = null;
+            if (!isHole(r, c)) specials[r][c] = null;
         }
     }
 
     do {
-        // Fisher-Yates shuffle
+        // Fisher-Yates shuffle — only playable cells
         const flat = [];
         for (let r = 0; r < GRID; r++) {
             for (let c = 0; c < GRID; c++) {
-                flat.push(board[r][c]);
+                if (!isHole(r, c)) flat.push(board[r][c]);
             }
         }
         for (let i = flat.length - 1; i > 0; i--) {
@@ -1834,7 +1861,7 @@ function shuffleBoard() {
         let idx = 0;
         for (let r = 0; r < GRID; r++) {
             for (let c = 0; c < GRID; c++) {
-                board[r][c] = flat[idx++];
+                if (!isHole(r, c)) board[r][c] = flat[idx++];
             }
         }
 

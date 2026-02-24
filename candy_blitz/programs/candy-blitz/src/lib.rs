@@ -3,9 +3,10 @@ use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
 use ephemeral_rollups_sdk::cpi::DelegateConfig;
 use ephemeral_rollups_sdk::ephem::{commit_accounts, commit_and_undelegate_accounts};
 
-declare_id!("4cPtNSt6qTzyojmuFUpAqJVW5yFfG2rPFhD7uu92YqtC");
+declare_id!("3GVDnQ8JF1pR1JeHABWK5Q6J2k2M5kBRZFgapCUk6Jfq");
 
 pub const PLAYER_SEED: &[u8] = b"player";
+pub const MAX_LEVELS: usize = 6;
 
 #[program]
 pub mod candy_blitz {
@@ -15,26 +16,46 @@ pub mod candy_blitz {
     pub fn initialize_player(ctx: Context<InitializePlayer>) -> Result<()> {
         let player = &mut ctx.accounts.player_account;
         player.authority = ctx.accounts.user.key();
-        player.total_score = 0;
+        player.best_scores = [0u64; MAX_LEVELS];
+        player.stars = [0u8; MAX_LEVELS];
+        player.completed_levels = 0;
         player.games_played = 0;
-        player.best_score = 0;
         player.last_level = 0;
         msg!("Player {} initialized", player.authority);
         Ok(())
     }
 
     /// Submit a score after completing a level.
-    pub fn submit_score(ctx: Context<SubmitScore>, level_id: u8, score: u64) -> Result<()> {
+    /// Only updates if new score is higher than the stored best for that level.
+    pub fn submit_score(ctx: Context<SubmitScore>, level_id: u8, score: u64, star_count: u8) -> Result<()> {
         let player = &mut ctx.accounts.player_account;
-        player.total_score = player.total_score.saturating_add(score);
+        let idx = level_id as usize;
+
+        require!(idx < MAX_LEVELS, ErrorCode::InvalidLevel);
+
+        // Update best score for this level (only if higher)
+        if score > player.best_scores[idx] {
+            player.best_scores[idx] = score;
+        }
+
+        // Update stars for this level (only if more)
+        if star_count > player.stars[idx] {
+            player.stars[idx] = star_count;
+        }
+
+        // Mark level as completed
+        player.completed_levels |= 1 << level_id;
+
         player.games_played += 1;
         player.last_level = level_id;
-        if score > player.best_score {
-            player.best_score = score;
-        }
+
+        // Compute totals for logging
+        let total: u64 = player.best_scores.iter().sum();
+        let best: u64 = *player.best_scores.iter().max().unwrap_or(&0);
+
         msg!(
-            "Score submitted: level={}, score={}, total={}, best={}",
-            level_id, score, player.total_score, player.best_score
+            "Score submitted: level={}, score={}, total_best={}, best_single={}",
+            level_id, score, total, best
         );
         Ok(())
     }
@@ -58,17 +79,27 @@ pub mod candy_blitz {
         ctx: Context<SubmitScoreAndCommit>,
         level_id: u8,
         score: u64,
+        star_count: u8,
     ) -> Result<()> {
         let player = &mut ctx.accounts.player_account;
-        player.total_score = player.total_score.saturating_add(score);
+        let idx = level_id as usize;
+
+        require!(idx < MAX_LEVELS, ErrorCode::InvalidLevel);
+
+        if score > player.best_scores[idx] {
+            player.best_scores[idx] = score;
+        }
+        if star_count > player.stars[idx] {
+            player.stars[idx] = star_count;
+        }
+        player.completed_levels |= 1 << level_id;
         player.games_played += 1;
         player.last_level = level_id;
-        if score > player.best_score {
-            player.best_score = score;
-        }
+
+        let total: u64 = player.best_scores.iter().sum();
         msg!(
-            "Score committed in ER: level={}, score={}, total={}",
-            level_id, score, player.total_score
+            "Score committed in ER: level={}, score={}, total_best={}",
+            level_id, score, total
         );
         player.exit(&crate::ID)?;
         commit_accounts(
@@ -148,9 +179,19 @@ pub struct SubmitScoreAndCommit<'info> {
 #[account]
 #[derive(InitSpace)]
 pub struct PlayerAccount {
-    pub authority: Pubkey,     // 32 bytes
-    pub total_score: u64,      // 8 bytes
-    pub best_score: u64,       // 8 bytes
-    pub games_played: u32,     // 4 bytes
-    pub last_level: u8,        // 1 byte
+    pub authority: Pubkey,            // 32 bytes
+    pub best_scores: [u64; 6],        // 48 bytes — best score per level
+    pub stars: [u8; 6],               // 6 bytes  — stars per level (0-3)
+    pub completed_levels: u8,         // 1 byte   — bitmask
+    pub games_played: u32,            // 4 bytes
+    pub last_level: u8,               // 1 byte
+    // Total: 92 bytes + 8 discriminator = 100
+}
+
+// ===== Errors =====
+
+#[error_code]
+pub enum ErrorCode {
+    #[msg("Invalid level ID. Must be 0-5.")]
+    InvalidLevel,
 }
