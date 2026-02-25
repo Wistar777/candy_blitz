@@ -77,9 +77,12 @@
             <div class="splash-candies">🍬🍭🍫🍩🧁🍪</div>
             <h1 class="splash-title">Candy Blitz</h1>
             <p class="splash-sub">Match-3 on Solana ⚡</p>
-            <p class="splash-desc">Every swap is an on-chain transaction — powered by MagicBlock Ephemeral Rollups</p>
+            <p class="splash-desc">Every swap is an on-chain transaction — powered by <strong>MagicBlock Ephemeral
+                    Rollups</strong></p>
             <button class="btn btn-wallet" id="walletBtn" onclick="openProfile()">🔗 Connect Wallet</button>
             <button class="btn btn-gold splash-btn hidden" id="playBtn" onclick="showMap()">🎮 Play</button>
+            <p class="splash-disclaimer">⚠️ This game runs on <strong>Solana Devnet</strong>. Test SOL required — <a
+                    href="https://faucet.solana.com/" target="_blank">get free devnet SOL</a></p>
         </div>
     </div>
 
@@ -129,6 +132,12 @@
         </div>
 
         <div class="board-container">
+            <div id="erLoadingOverlay" class="er-loading-overlay hidden">
+                <div class="er-loading-card">
+                    <div class="tx-spinner" style="width: 32px; height: 32px; border-width: 4px;"></div>
+                    <span id="erLoadingText">⏳ Preparing game...</span>
+                </div>
+            </div>
             <div class="board" id="board"></div>
         </div>
 
@@ -154,7 +163,11 @@
         </div>
         <div class="win-candy-icon" style="font-size: 4rem; margin: 1rem 0;">🍬</div>
         <p class="baby-message" id="winBabyMsg"></p>
-        <button class="btn btn-gold" onclick="showMap()">To Map 🗺️</button>
+        <div id="winTxLoading" class="tx-loading hidden">
+            <div class="tx-spinner"></div>
+            <span>Saving to blockchain...</span>
+        </div>
+        <button class="btn btn-gold" id="winMapBtn" onclick="showMap()">To Map 🗺️</button>
     </div>
 
     <!-- Level Failed Screen -->

@@ -3,11 +3,12 @@ use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
 use ephemeral_rollups_sdk::cpi::DelegateConfig;
 use ephemeral_rollups_sdk::ephem::{commit_accounts, commit_and_undelegate_accounts};
 
-declare_id!("3GVDnQ8JF1pR1JeHABWK5Q6J2k2M5kBRZFgapCUk6Jfq");
+declare_id!("CbYNU3N29sGLTDRexxzeu1NDzNg2DS3bUonxT7xH8MXH");
 
 pub const PLAYER_SEED: &[u8] = b"player";
 pub const MAX_LEVELS: usize = 6;
 
+#[ephemeral]
 #[program]
 pub mod candy_blitz {
     use super::*;
@@ -21,52 +22,42 @@ pub mod candy_blitz {
         player.completed_levels = 0;
         player.games_played = 0;
         player.last_level = 0;
+        player.current_score = 0;
+        player.current_level = 0;
+        player.swap_count = 0;
+        player.session_active = false;
         msg!("Player {} initialized", player.authority);
         Ok(())
     }
 
-    /// Submit a score after completing a level.
-    /// Only updates if new score is higher than the stored best for that level.
+    /// Submit a score after completing a level (base layer fallback, no ER).
     pub fn submit_score(ctx: Context<SubmitScore>, level_id: u8, score: u64, star_count: u8) -> Result<()> {
         let player = &mut ctx.accounts.player_account;
         let idx = level_id as usize;
-
         require!(idx < MAX_LEVELS, ErrorCode::InvalidLevel);
 
-        // Update best score for this level (only if higher)
         if score > player.best_scores[idx] {
             player.best_scores[idx] = score;
         }
-
-        // Update stars for this level (only if more)
         if star_count > player.stars[idx] {
             player.stars[idx] = star_count;
         }
-
-        // Mark level as completed
         player.completed_levels |= 1 << level_id;
-
         player.games_played += 1;
         player.last_level = level_id;
 
-        // Compute totals for logging
         let total: u64 = player.best_scores.iter().sum();
-        let best: u64 = *player.best_scores.iter().max().unwrap_or(&0);
-
-        msg!(
-            "Score submitted: level={}, score={}, total_best={}, best_single={}",
-            level_id, score, total, best
-        );
+        msg!("Score submitted: level={}, score={}, total_best={}", level_id, score, total);
         Ok(())
     }
 
     /// Delegate the player account to MagicBlock ER for low-latency play.
-    pub fn delegate_player(ctx: Context<DelegatePlayer>) -> Result<()> {
+    pub fn delegate_player(ctx: Context<DelegatePlayerInput>) -> Result<()> {
         ctx.accounts.delegate_pda(
             &ctx.accounts.payer,
             &[PLAYER_SEED, ctx.accounts.payer.key().as_ref()],
             DelegateConfig {
-                validator: ctx.remaining_accounts.first().map(|acc| acc.key()),
+                validator: ctx.accounts.validator.as_ref().map(|v| v.key()),
                 ..Default::default()
             },
         )?;
@@ -74,17 +65,39 @@ pub mod candy_blitz {
         Ok(())
     }
 
-    /// Submit score + commit state in the ER (fast, cheap).
+    /// Start a new game session on the ER. Resets session state.
+    pub fn start_session(ctx: Context<GameSession>, level_id: u8) -> Result<()> {
+        let player = &mut ctx.accounts.player_account;
+        require!((level_id as usize) < MAX_LEVELS, ErrorCode::InvalidLevel);
+        player.current_score = 0;
+        player.current_level = level_id;
+        player.swap_count = 0;
+        player.session_active = true;
+        msg!("Session started: level {}", level_id);
+        Ok(())
+    }
+
+    /// Record a single swap during gameplay (called on ER, gasless).
+    pub fn record_swap(ctx: Context<GameSession>, score_delta: u64) -> Result<()> {
+        let player = &mut ctx.accounts.player_account;
+        require!(player.session_active, ErrorCode::NoActiveSession);
+        player.swap_count += 1;
+        player.current_score += score_delta;
+        Ok(())
+    }
+
+    /// End session + commit state back to base layer via ER.
     pub fn submit_score_and_commit(
-        ctx: Context<SubmitScoreAndCommit>,
-        level_id: u8,
-        score: u64,
+        ctx: Context<CommitScore>,
         star_count: u8,
     ) -> Result<()> {
         let player = &mut ctx.accounts.player_account;
-        let idx = level_id as usize;
+        require!(player.session_active, ErrorCode::NoActiveSession);
 
+        let idx = player.current_level as usize;
         require!(idx < MAX_LEVELS, ErrorCode::InvalidLevel);
+
+        let score = player.current_score;
 
         if score > player.best_scores[idx] {
             player.best_scores[idx] = score;
@@ -92,16 +105,17 @@ pub mod candy_blitz {
         if star_count > player.stars[idx] {
             player.stars[idx] = star_count;
         }
-        player.completed_levels |= 1 << level_id;
+        player.completed_levels |= 1 << player.current_level;
         player.games_played += 1;
-        player.last_level = level_id;
+        player.last_level = player.current_level;
+        player.session_active = false;
 
         let total: u64 = player.best_scores.iter().sum();
         msg!(
-            "Score committed in ER: level={}, score={}, total_best={}",
-            level_id, score, total
+            "Score committed in ER: level={}, score={}, swaps={}, total={}",
+            player.current_level, score, player.swap_count, total
         );
-        player.exit(&crate::ID)?;
+
         commit_accounts(
             &ctx.accounts.payer,
             vec![&ctx.accounts.player_account.to_account_info()],
@@ -112,7 +126,7 @@ pub mod candy_blitz {
     }
 
     /// Undelegate (commit + return to base layer).
-    pub fn undelegate_player(ctx: Context<SubmitScoreAndCommit>) -> Result<()> {
+    pub fn undelegate_player(ctx: Context<CommitScore>) -> Result<()> {
         commit_and_undelegate_accounts(
             &ctx.accounts.payer,
             vec![&ctx.accounts.player_account.to_account_info()],
@@ -153,22 +167,43 @@ pub struct SubmitScore<'info> {
 }
 
 /// Delegate the player PDA to the ER.
+#[delegate]
 #[derive(Accounts)]
-pub struct DelegatePlayer<'info> {
+pub struct DelegatePlayerInput<'info> {
     pub payer: Signer<'info>,
+    /// CHECK: Checked by the delegate program
+    pub validator: Option<AccountInfo<'info>>,
     /// CHECK: The PDA to delegate
     #[account(mut, del)]
     pub pda: AccountInfo<'info>,
 }
 
-/// Submit score + commit in ER context.
+/// Game session operations (start_session, record_swap) — used on ER.
 #[derive(Accounts)]
-pub struct SubmitScoreAndCommit<'info> {
+pub struct GameSession<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
+    /// CHECK: The wallet that owns this PDA (passed as non-signer for PDA derivation)
+    pub authority: AccountInfo<'info>,
     #[account(
         mut,
-        seeds = [PLAYER_SEED, payer.key().as_ref()],
+        seeds = [PLAYER_SEED, authority.key().as_ref()],
+        bump
+    )]
+    pub player_account: Account<'info, PlayerAccount>,
+}
+
+/// Commit score + undelegate in ER context.
+#[commit]
+#[derive(Accounts)]
+pub struct CommitScore<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: The wallet that owns this PDA (passed as non-signer for PDA derivation)
+    pub authority: AccountInfo<'info>,
+    #[account(
+        mut,
+        seeds = [PLAYER_SEED, authority.key().as_ref()],
         bump
     )]
     pub player_account: Account<'info, PlayerAccount>,
@@ -180,12 +215,17 @@ pub struct SubmitScoreAndCommit<'info> {
 #[derive(InitSpace)]
 pub struct PlayerAccount {
     pub authority: Pubkey,            // 32 bytes
-    pub best_scores: [u64; 6],        // 48 bytes — best score per level
-    pub stars: [u8; 6],               // 6 bytes  — stars per level (0-3)
-    pub completed_levels: u8,         // 1 byte   — bitmask
+    pub best_scores: [u64; 6],        // 48 bytes
+    pub stars: [u8; 6],               // 6 bytes
+    pub completed_levels: u8,         // 1 byte
     pub games_played: u32,            // 4 bytes
     pub last_level: u8,               // 1 byte
-    // Total: 92 bytes + 8 discriminator = 100
+    // --- ER session fields ---
+    pub current_score: u64,           // 8 bytes
+    pub current_level: u8,            // 1 byte
+    pub swap_count: u32,              // 4 bytes
+    pub session_active: bool,         // 1 byte
+    // Total: 106 bytes + 8 discriminator = 114
 }
 
 // ===== Errors =====
@@ -194,4 +234,6 @@ pub struct PlayerAccount {
 pub enum ErrorCode {
     #[msg("Invalid level ID. Must be 0-5.")]
     InvalidLevel,
+    #[msg("No active game session. Call start_session first.")]
+    NoActiveSession,
 }

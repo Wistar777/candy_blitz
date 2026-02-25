@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.devnet]
-candy_blitz = "3GVDnQ8JF1pR1JeHABWK5Q6J2k2M5kBRZFgapCUk6Jfq"
+candy_blitz = "CbYNU3N29sGLTDRexxzeu1NDzNg2DS3bUonxT7xH8MXH"
 
 [registry]
 url = "https://api.apr.dev"

@@ -4,32 +4,47 @@
  */
 
 // Deployed Anchor Program on Solana Devnet (with ephemeral-rollups-sdk)
-const PROGRAM_ID = '3GVDnQ8JF1pR1JeHABWK5Q6J2k2M5kBRZFgapCUk6Jfq';
+const PROGRAM_ID = 'CbYNU3N29sGLTDRexxzeu1NDzNg2DS3bUonxT7xH8MXH';
 const PLAYER_SEED = 'player';
+
+// MagicBlock Delegation Program (standard across all ER deployments)
+const DELEGATION_PROGRAM_ID = 'DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh';
+// MagicBlock EU Devnet validator
+const ER_VALIDATOR = 'MEUGGrYPxKk17hCr7wpT6s8dtNokZj5U2L57vjYMS8e';
+// MagicBlock ER system programs (injected by #[commit] macro)
+const MAGIC_PROGRAM_ID = 'Magic11111111111111111111111111111111111111';
+const MAGIC_CONTEXT_ID = 'MagicContext1111111111111111111111111111111';
 
 // Solana endpoints
 const SOLANA_RPC = 'https://api.devnet.solana.com';        // Base layer (Devnet)
 const ER_RPC = 'https://devnet-eu.magicblock.app';          // MagicBlock Ephemeral Rollup
 
+// PlayerAccount data size: 8 discriminator + 106 data = 114 bytes
+const PLAYER_ACCOUNT_SIZE = 114;
+
 // Anchor instruction discriminators (first 8 bytes of SHA256("global:instruction_name"))
-// Pre-computed for vanilla JS (no crypto.subtle needed at call time)
 const DISCRIMINATORS = {
-    initialize_player: null, // computed on init
+    initialize_player: null,
     submit_score: null,
+    delegate_player: null,
+    start_session: null,
+    record_swap: null,
+    submit_score_and_commit: null,
+    undelegate_player: null,
 };
 
-// Score & session tracking
+// Score tracking
 let lastTxSignature = null;
-let scoreHistory = [];
 let playerAccountInitializedFor = null;
 
-// Active game session — tracks swaps locally
+// Active game session — tracks state for ER integration
 let gameSession = {
     active: false,
     levelId: null,
     swaps: 0,
-    swapLog: [],
     startTime: null,
+    erDelegated: false,
+    ephemeralKeypair: null,  // Generated per session for signing ER transactions (no wallet popup)
 };
 
 // ===== Anchor Helpers =====
@@ -52,16 +67,79 @@ function getPlayerPDA(walletPubkey) {
     return pda;
 }
 
-// Serialize submit_score args: level_id (u8), score (u64), swaps (u32) in little-endian
-function serializeScoreArgs(levelId, score, swaps) {
-    const buf = new ArrayBuffer(13); // 1 + 8 + 4
+// Serialize submit_score args: level_id (u8), score (u64), star_count (u8) in little-endian
+function serializeScoreArgs(levelId, score, starCount) {
+    const buf = new ArrayBuffer(10); // 1 + 8 + 1
     const view = new DataView(buf);
     view.setUint8(0, levelId);                    // u8
     // u64 as two u32s (little-endian)
     view.setUint32(1, score & 0xFFFFFFFF, true);  // low 32 bits
     view.setUint32(5, Math.floor(score / 0x100000000) & 0xFFFFFFFF, true); // high 32 bits
-    view.setUint32(9, swaps, true);               // u32
+    view.setUint8(9, starCount);                  // u8
     return new Uint8Array(buf);
+}
+
+// Serialize start_session args: level_id (u8)
+function serializeStartSessionArgs(levelId) {
+    return new Uint8Array([levelId]);
+}
+
+// Serialize record_swap args: score_delta (u64)
+function serializeRecordSwapArgs(scoreDelta) {
+    const buf = new ArrayBuffer(8);
+    const view = new DataView(buf);
+    view.setUint32(0, scoreDelta & 0xFFFFFFFF, true);
+    view.setUint32(4, Math.floor(scoreDelta / 0x100000000) & 0xFFFFFFFF, true);
+    return new Uint8Array(buf);
+}
+
+// Serialize submit_score_and_commit args: star_count (u8)
+function serializeCommitArgs(starCount) {
+    return new Uint8Array([starCount]);
+}
+
+// Deserialize PlayerAccount from on-chain data
+function deserializePlayerAccount(data) {
+    const view = new DataView(data.buffer, data.byteOffset);
+    const authority = new solanaWeb3.PublicKey(data.slice(8, 40));
+
+    // best_scores: [u64; 6] at offset 40
+    const bestScores = [];
+    for (let i = 0; i < 6; i++) {
+        bestScores.push(Number(view.getBigUint64(40 + i * 8, true)));
+    }
+
+    // stars: [u8; 6] at offset 88
+    const stars = [];
+    for (let i = 0; i < 6; i++) {
+        stars.push(view.getUint8(88 + i));
+    }
+
+    const completedLevels = view.getUint8(94);    // u8 bitmask
+    const gamesPlayed = view.getUint32(95, true); // u32
+    const lastLevel = view.getUint8(99);          // u8
+
+    // ER session fields
+    const currentScore = Number(view.getBigUint64(100, true));
+    const currentLevel = view.getUint8(108);
+    const swapCount = view.getUint32(109, true);
+    const sessionActive = view.getUint8(113) !== 0;
+
+    const totalScore = bestScores.reduce((a, b) => a + b, 0);
+
+    return {
+        authority: authority.toString(),
+        bestScores,
+        stars,
+        completedLevels,
+        gamesPlayed,
+        lastLevel,
+        totalScore,
+        currentScore,
+        currentLevel,
+        swapCount,
+        sessionActive,
+    };
 }
 
 // State
@@ -69,7 +147,6 @@ let wallet = null;
 let walletProvider = null;
 let solanaConnection = null;
 let erConnection = null;
-let activeSession = null;
 let onConnectCallback = null;
 
 // ===== Known Wallet Providers =====
@@ -116,7 +193,12 @@ export function initBlockchain() {
         (async () => {
             DISCRIMINATORS.initialize_player = await getDiscriminator('initialize_player');
             DISCRIMINATORS.submit_score = await getDiscriminator('submit_score');
-            console.log('[Anchor] Discriminators computed');
+            DISCRIMINATORS.delegate_player = await getDiscriminator('delegate_player');
+            DISCRIMINATORS.start_session = await getDiscriminator('start_session');
+            DISCRIMINATORS.record_swap = await getDiscriminator('record_swap');
+            DISCRIMINATORS.submit_score_and_commit = await getDiscriminator('submit_score_and_commit');
+            DISCRIMINATORS.undelegate_player = await getDiscriminator('undelegate_player');
+            console.log('[Anchor] All discriminators computed (including ER)');
         })();
 
         console.log(`[Anchor] Program: ${PROGRAM_ID}`);
@@ -371,29 +453,335 @@ export async function disconnectWallet() {
 
 // ===== MagicBlock ER Game Session =====
 
+// Local session tracking (always works)
 export function startGameSession(levelId) {
     gameSession = {
         active: true,
         levelId,
         swaps: 0,
-        swapLog: [],
         startTime: Date.now(),
+        erDelegated: false,
+        ephemeralKeypair: solanaWeb3.Keypair.generate(),  // Ephemeral signer for ER (no wallet popup)
     };
-    console.log(`[MagicBlock] 🎮 Session started for level ${levelId}`);
+    console.log(`[MagicBlock] 🎮 Local session started for level ${levelId} (ephemeral signer: ${gameSession.ephemeralKeypair.publicKey.toBase58().slice(0, 8)}...)`);
 }
 
 export function recordSwap(fromR, fromC, toR, toC, scoreGained) {
     if (!gameSession.active) return;
     gameSession.swaps++;
-    gameSession.swapLog.push({
-        n: gameSession.swaps,
-        m: `${fromR},${fromC}>${toR},${toC}`,
-        p: scoreGained,
-    });
 }
 
-export function getSessionSwapCount() {
-    return gameSession.swaps;
+// ===== MagicBlock ER — Delegate Player PDA =====
+
+// Derive delegation-related PDAs (seeds from the delegation-program source)
+function getDelegationPDAs(accountPubkey) {
+    const delegationProgramId = new solanaWeb3.PublicKey(DELEGATION_PROGRAM_ID);
+    const ownerProgramId = new solanaWeb3.PublicKey(PROGRAM_ID);
+    const accountBytes = accountPubkey.toBytes();
+
+    // buffer_pda: seeds = ["buffer", delegated_account], program = OWNER program (not delegation!)
+    const [bufferPda] = solanaWeb3.PublicKey.findProgramAddressSync(
+        [new TextEncoder().encode('buffer'), accountBytes],
+        ownerProgramId
+    );
+    // delegation_record: seeds = ["delegation", delegated_account], program = delegation_program
+    const [delegationRecordPda] = solanaWeb3.PublicKey.findProgramAddressSync(
+        [new TextEncoder().encode('delegation'), accountBytes],
+        delegationProgramId
+    );
+    // delegation_metadata: seeds = ["delegation-metadata", delegated_account], program = delegation_program
+    const [delegationMetadataPda] = solanaWeb3.PublicKey.findProgramAddressSync(
+        [new TextEncoder().encode('delegation-metadata'), accountBytes],
+        delegationProgramId
+    );
+    return { bufferPda, delegationRecordPda, delegationMetadataPda };
+}
+
+export async function delegatePlayerAccount() {
+    if (!wallet || !solanaConnection) return false;
+
+    try {
+        await ensurePlayerAccount();
+        const programId = new solanaWeb3.PublicKey(PROGRAM_ID);
+        const delegationProgramId = new solanaWeb3.PublicKey(DELEGATION_PROGRAM_ID);
+        const playerPDA = getPlayerPDA(wallet);
+
+        // Check if PDA is already delegated (owned by delegation program from a previous session)
+        const accountInfo = await solanaConnection.getAccountInfo(playerPDA);
+        if (accountInfo && accountInfo.owner.equals(delegationProgramId)) {
+            console.log('[MagicBlock] ✅ PDA already delegated (from previous session), skipping delegation TX');
+            gameSession.erDelegated = true;
+            return true;
+        }
+
+        const validatorKey = new solanaWeb3.PublicKey(ER_VALIDATOR);
+        const disc = DISCRIMINATORS.delegate_player || await getDiscriminator('delegate_player');
+
+        // Derive delegation-related PDAs
+        const { bufferPda, delegationRecordPda, delegationMetadataPda } = getDelegationPDAs(playerPDA);
+
+        // IDL account order: payer, validator, buffer_pda, delegation_record_pda, delegation_metadata_pda, pda, owner_program, delegation_program, system_program
+        const ix = new solanaWeb3.TransactionInstruction({
+            keys: [
+                { pubkey: wallet, isSigner: true, isWritable: true },
+                { pubkey: validatorKey, isSigner: false, isWritable: false },
+                { pubkey: bufferPda, isSigner: false, isWritable: true },
+                { pubkey: delegationRecordPda, isSigner: false, isWritable: true },
+                { pubkey: delegationMetadataPda, isSigner: false, isWritable: true },
+                { pubkey: playerPDA, isSigner: false, isWritable: true },
+                { pubkey: programId, isSigner: false, isWritable: false },
+                { pubkey: delegationProgramId, isSigner: false, isWritable: false },
+                { pubkey: solanaWeb3.SystemProgram.programId, isSigner: false, isWritable: false },
+            ],
+            programId,
+            data: Uint8Array.from(disc),
+        });
+
+        const tx = new solanaWeb3.Transaction().add(ix);
+        const { blockhash } = await solanaConnection.getLatestBlockhash('confirmed');
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = wallet;
+
+        const signed = await walletProvider.signTransaction(tx);
+        const sig = await solanaConnection.sendRawTransaction(signed.serialize());
+        await solanaConnection.confirmTransaction(sig, 'confirmed');
+
+        gameSession.erDelegated = true;
+        console.log(`[MagicBlock] ✅ Player PDA delegated to ER! TX: ${sig}`);
+        return true;
+    } catch (err) {
+        console.error('[MagicBlock] Delegation failed:', err);
+        gameSession.erDelegated = false;
+        return false;
+    }
+}
+
+// ===== MagicBlock ER — Start Session on ER =====
+
+export async function startSessionOnER(levelId) {
+    if (!wallet || !erConnection || !gameSession.erDelegated) return false;
+    const ephKp = gameSession.ephemeralKeypair;
+    if (!ephKp) { console.warn('[MagicBlock] No ephemeral keypair'); return false; }
+
+    try {
+        const programId = new solanaWeb3.PublicKey(PROGRAM_ID);
+        const playerPDA = getPlayerPDA(wallet);
+        const disc = DISCRIMINATORS.start_session || await getDiscriminator('start_session');
+        const args = serializeStartSessionArgs(levelId);
+
+        const data = new Uint8Array(disc.length + args.length);
+        data.set(disc, 0);
+        data.set(args, disc.length);
+
+        const ix = new solanaWeb3.TransactionInstruction({
+            keys: [
+                { pubkey: ephKp.publicKey, isSigner: true, isWritable: true },
+                { pubkey: wallet, isSigner: false, isWritable: false },
+                { pubkey: playerPDA, isSigner: false, isWritable: true },
+            ],
+            programId,
+            data: Uint8Array.from(data),
+        });
+
+        const tx = new solanaWeb3.Transaction().add(ix);
+        const blockhash = await getERBlockhash();
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = ephKp.publicKey;
+        tx.sign(ephKp);
+
+        const sig = await erConnection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+        console.log(`[MagicBlock] ⚡ Session started on ER: level=${levelId}, TX: ${sig}`);
+        return true;
+    } catch (err) {
+        console.error('[MagicBlock] Start session on ER failed:', err);
+        return false;
+    }
+}
+
+// ===== MagicBlock ER — Record Swap (fire-and-forget) =====
+
+// Cache ER blockhash to avoid 429 rate limits (valid ~60s, refresh every 30s)
+let cachedERBlockhash = null;
+let cachedERBlockhashTime = 0;
+const ER_BLOCKHASH_TTL = 30_000; // 30 seconds
+
+async function getERBlockhash() {
+    const now = Date.now();
+    if (cachedERBlockhash && (now - cachedERBlockhashTime) < ER_BLOCKHASH_TTL) {
+        return cachedERBlockhash;
+    }
+    const { blockhash } = await erConnection.getLatestBlockhash('confirmed');
+    cachedERBlockhash = blockhash;
+    cachedERBlockhashTime = now;
+    return blockhash;
+}
+export async function recordSwapOnER(scoreDelta) {
+    if (!wallet || !erConnection || !gameSession.erDelegated || scoreDelta <= 0) return;
+    const ephKp = gameSession.ephemeralKeypair;
+    if (!ephKp) return;
+
+    try {
+        const programId = new solanaWeb3.PublicKey(PROGRAM_ID);
+        const playerPDA = getPlayerPDA(wallet);
+        const disc = DISCRIMINATORS.record_swap || await getDiscriminator('record_swap');
+        const args = serializeRecordSwapArgs(scoreDelta);
+
+        const data = new Uint8Array(disc.length + args.length);
+        data.set(disc, 0);
+        data.set(args, disc.length);
+
+        const ix = new solanaWeb3.TransactionInstruction({
+            keys: [
+                { pubkey: ephKp.publicKey, isSigner: true, isWritable: true },
+                { pubkey: wallet, isSigner: false, isWritable: false },
+                { pubkey: playerPDA, isSigner: false, isWritable: true },
+            ],
+            programId,
+            data: Uint8Array.from(data),
+        });
+
+        // Add unique compute budget to prevent tx deduplication (same blockhash + same args = same tx hash)
+        const uniqueIx = solanaWeb3.ComputeBudgetProgram.setComputeUnitPrice({ microLamports: gameSession.swaps });
+
+        const tx = new solanaWeb3.Transaction().add(uniqueIx).add(ix);
+        const blockhash = await getERBlockhash();
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = ephKp.publicKey;
+        tx.sign(ephKp);
+
+        // Fire-and-forget: don't await confirmation to avoid blocking gameplay
+        erConnection.sendRawTransaction(tx.serialize(), { skipPreflight: true }).then(sig => {
+            console.log(`[MagicBlock] ⚡ Swap #${gameSession.swaps} recorded on ER (+${scoreDelta} pts)`);
+        }).catch(err => {
+            console.warn('[MagicBlock] Swap record failed (non-blocking):', err.message);
+        });
+    } catch (err) {
+        console.warn('[MagicBlock] recordSwapOnER error (non-blocking):', err.message);
+    }
+}
+
+// ===== MagicBlock ER — Commit & Undelegate =====
+
+export async function commitAndUndelegate(starCount) {
+    if (!wallet || !erConnection || !gameSession.erDelegated) return false;
+    const ephKp = gameSession.ephemeralKeypair;
+    if (!ephKp) { console.warn('[MagicBlock] No ephemeral keypair for commit'); return false; }
+
+    try {
+        const programId = new solanaWeb3.PublicKey(PROGRAM_ID);
+        const playerPDA = getPlayerPDA(wallet);
+        const magicProgram = new solanaWeb3.PublicKey(MAGIC_PROGRAM_ID);
+        const magicContext = new solanaWeb3.PublicKey(MAGIC_CONTEXT_ID);
+
+        // 1. Submit score and commit
+        const commitDisc = DISCRIMINATORS.submit_score_and_commit || await getDiscriminator('submit_score_and_commit');
+        const commitArgs = serializeCommitArgs(starCount);
+        const commitData = new Uint8Array(commitDisc.length + commitArgs.length);
+        commitData.set(commitDisc, 0);
+        commitData.set(commitArgs, commitDisc.length);
+
+        // IDL: payer, player_account, magic_program, magic_context
+        const commitIx = new solanaWeb3.TransactionInstruction({
+            keys: [
+                { pubkey: ephKp.publicKey, isSigner: true, isWritable: true },
+                { pubkey: wallet, isSigner: false, isWritable: false },
+                { pubkey: playerPDA, isSigner: false, isWritable: true },
+                { pubkey: magicProgram, isSigner: false, isWritable: false },
+                { pubkey: magicContext, isSigner: false, isWritable: true },
+            ],
+            programId,
+            data: Uint8Array.from(commitData),
+        });
+
+        const commitTx = new solanaWeb3.Transaction().add(commitIx);
+        const bh1 = await getERBlockhash();
+        commitTx.recentBlockhash = bh1;
+        commitTx.feePayer = ephKp.publicKey;
+        commitTx.sign(ephKp);
+
+        const commitSig = await erConnection.sendRawTransaction(commitTx.serialize(), { skipPreflight: true });
+        console.log(`[MagicBlock] ✅ Score committed on ER: ${commitSig}`);
+
+        // 2. Undelegate (return PDA to base layer)
+        const undelDisc = DISCRIMINATORS.undelegate_player || await getDiscriminator('undelegate_player');
+
+        // IDL: payer, player_account, magic_program, magic_context
+        const undelIx = new solanaWeb3.TransactionInstruction({
+            keys: [
+                { pubkey: ephKp.publicKey, isSigner: true, isWritable: true },
+                { pubkey: wallet, isSigner: false, isWritable: false },
+                { pubkey: playerPDA, isSigner: false, isWritable: true },
+                { pubkey: magicProgram, isSigner: false, isWritable: false },
+                { pubkey: magicContext, isSigner: false, isWritable: true },
+            ],
+            programId,
+            data: Uint8Array.from(undelDisc),
+        });
+
+        const undelTx = new solanaWeb3.Transaction().add(undelIx);
+        const bh2 = await getERBlockhash();
+        undelTx.recentBlockhash = bh2;
+        undelTx.feePayer = ephKp.publicKey;
+        undelTx.sign(ephKp);
+
+        const undelSig = await erConnection.sendRawTransaction(undelTx.serialize(), { skipPreflight: true });
+        console.log(`[MagicBlock] ✅ Player PDA undelegated: ${undelSig}`);
+
+        lastTxSignature = commitSig;
+        showTxNotification(commitSig, gameSession.swaps);
+        gameSession.erDelegated = false;
+        gameSession.active = false;
+
+        return true;
+    } catch (err) {
+        console.error('[MagicBlock] Commit+undelegate failed:', err);
+        gameSession.erDelegated = false;
+        return false;
+    }
+}
+
+// ===== Wait for PDA to settle back to Devnet after ER undelegate =====
+
+export async function waitForPDASettlement() {
+    if (!wallet || !solanaConnection) return false;
+    const programId = new solanaWeb3.PublicKey(PROGRAM_ID);
+    const playerPDA = getPlayerPDA(wallet);
+
+    for (let attempt = 0; attempt < 10; attempt++) {
+        await new Promise(r => setTimeout(r, 3000));
+        try {
+            const info = await solanaConnection.getAccountInfo(playerPDA);
+            if (info && info.owner.equals(programId)) {
+                console.log(`[TX] PDA settled to Devnet after ${(attempt + 1) * 3}s`);
+                return true;
+            }
+            console.log(`[TX] PDA still delegated, waiting... (${(attempt + 1) * 3}s)`);
+        } catch (e) { /* retry */ }
+    }
+    console.warn('[TX] PDA never settled to Devnet within 30s');
+    return false;
+}
+
+// ===== Fetch Player Progress from On-Chain =====
+
+export async function fetchPlayerProgress() {
+    if (!wallet || !solanaConnection) return null;
+
+    try {
+        const playerPDA = getPlayerPDA(wallet);
+        const accountInfo = await solanaConnection.getAccountInfo(playerPDA);
+        if (!accountInfo || !accountInfo.data) {
+            console.log('[Anchor] No player account found on-chain (new player)');
+            return null;
+        }
+
+        const progress = deserializePlayerAccount(accountInfo.data);
+        console.log('[Anchor] 📊 Player progress loaded from chain:', progress);
+        return progress;
+    } catch (err) {
+        console.error('[Anchor] Failed to fetch player progress:', err);
+        return null;
+    }
 }
 
 // ===== Initialize Player Account (PDA) =====
@@ -440,31 +828,28 @@ async function ensurePlayerAccount() {
         await solanaConnection.confirmTransaction(sig, 'confirmed');
 
         playerAccountInitializedFor = wallet.toString();
-        // Fallback catch if signature confirmation fails
         console.log(`[Anchor] ✅ Player account created: ${sig}`);
     } catch (err) {
         console.error('[Anchor] Player account creation failed:', err);
     }
 }
 
-// ===== Submit Score via Anchor Program =====
+// ===== Submit Score via Anchor Program (Devnet fallback, no ER) =====
 
-export async function submitScore(levelId, score, moves) {
+export async function submitScore(levelId, score, starCount) {
     if (!wallet || !solanaConnection) {
         console.log('[Wallet] No wallet connected, score saved locally only');
         return false;
     }
 
     try {
-        // Ensure player PDA exists on base layer first
         await ensurePlayerAccount();
 
         const programId = new solanaWeb3.PublicKey(PROGRAM_ID);
         const playerPDA = getPlayerPDA(wallet);
         const disc = DISCRIMINATORS.submit_score || await getDiscriminator('submit_score');
 
-        // Serialize: discriminator (8) + level_id (1) + score (8) + swaps (4)
-        const args = serializeScoreArgs(levelId, score, gameSession.swaps);
+        const args = serializeScoreArgs(levelId, score, starCount);
         const data = new Uint8Array(disc.length + args.length);
         data.set(disc, 0);
         data.set(args, disc.length);
@@ -478,10 +863,8 @@ export async function submitScore(levelId, score, moves) {
             data: Uint8Array.from(data),
         });
 
-        console.log(`[Anchor] 📦 Submitting score: level=${levelId}, score=${score}, swaps=${gameSession.swaps}`);
-        console.log(`[Anchor] Player PDA: ${playerPDA.toString()}`);
+        console.log(`[Anchor] 📦 Submitting score (Devnet fallback): level=${levelId}, score=${score}, stars=${starCount}`);
 
-        // Send to Devnet base layer (where our program is deployed)
         const tx = new solanaWeb3.Transaction().add(ix);
         const { blockhash } = await solanaConnection.getLatestBlockhash('confirmed');
         tx.recentBlockhash = blockhash;
@@ -492,17 +875,14 @@ export async function submitScore(levelId, score, moves) {
         await solanaConnection.confirmTransaction(signature, 'confirmed');
 
         lastTxSignature = signature;
-        console.log(`[Anchor] ✅ Score committed! TX: ${signature}`);
-        console.log(`[Anchor] View: https://explorer.solana.com/tx/${signature}?cluster=devnet`);
+        console.log(`[Anchor] ✅ Score committed on Devnet! TX: ${signature}`);
 
-        scoreHistory.push({ levelId, score, moves, signature, swaps: gameSession.swaps, ts: Date.now() });
         showTxNotification(signature, gameSession.swaps);
         gameSession.active = false;
 
         return true;
     } catch (err) {
         console.error('[Anchor] Score submission failed:', err);
-        console.error('[Anchor] Error details:', err.message || err);
         gameSession.active = false;
         return false;
     }
@@ -550,10 +930,9 @@ export async function fetchLeaderboard() {
     try {
         const programId = new solanaWeb3.PublicKey(PROGRAM_ID);
 
-        // Fetch ALL PlayerAccount PDAs from our program
         const accounts = await solanaConnection.getProgramAccounts(programId, {
             filters: [
-                { dataSize: 8 + 32 + 8 + 8 + 4 + 1 }, // discriminator + PlayerAccount struct
+                { dataSize: PLAYER_ACCOUNT_SIZE },
             ],
         });
 
@@ -562,31 +941,18 @@ export async function fetchLeaderboard() {
         const players = [];
         for (const { pubkey, account } of accounts) {
             try {
-                const data = account.data;
-                // Anchor layout: 8-byte discriminator, then:
-                // authority (32), total_score (u64), best_score (u64), games_played (u32), last_level (u8)
-                const view = new DataView(data.buffer, data.byteOffset);
-
-                const authority = new solanaWeb3.PublicKey(data.slice(8, 40));
-                const totalScore = Number(view.getBigUint64(40, true));
-                const bestScore = Number(view.getBigUint64(48, true));
-                const gamesPlayed = view.getUint32(56, true);
-                const lastLevel = view.getUint8(60);
-
-                if (bestScore > 0) {
+                const parsed = deserializePlayerAccount(account.data);
+                if (parsed.totalScore > 0) {
                     players.push({
-                        player: authority.toString(),
+                        player: parsed.authority,
                         pda: pubkey.toString(),
-                        totalScore,
-                        bestScore,
-                        gamesPlayed,
-                        lastLevel,
+                        totalScore: parsed.totalScore,
                     });
                 }
             } catch (e) { /* skip malformed */ }
         }
 
-        // Sort by total score descending
+        // Sort by total score (sum of best scores) descending
         players.sort((a, b) => b.totalScore - a.totalScore);
         return players;
     } catch (err) {

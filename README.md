@@ -1,76 +1,110 @@
 # Candy Blitz: Solana On-Chain Puzzle Game
 
-**Candy Blitz** is a Match-3 puzzle game built entirely on HTML/JS/CSS, tightly integrated with the **Solana Blockchain** and **MagicBlock's Ephemeral Rollups (ER) SDK**. It demonstrates how to combine casual web gaming with high-performance on-chain logic, persistent scoring, and real-time state delegation.
+**Candy Blitz** is a Match-3 puzzle game built entirely on HTML/JS/CSS, tightly integrated with the **Solana Blockchain** and **MagicBlock's Ephemeral Rollups (ER)**. Every swap is verified on-chain with sub-second finality — no wallet popups during gameplay.
 
 ## 🌟 Gameplay Overview
 * **Classic Match-3 Mechanics:** Swap adjacent candies to match 3 or more, earning points before the timer runs out.
-* **Special Candies:** Match 4 to create a Bomb/Rocket, or match 5 to create a Rainbow Candy for massive screen-clearing effects.
-* **Interactive World Map:** Progress through 6 unique candy-themed levels (Chocolate Factory, Lollipop Lane, Gummy Gardens, etc.), unlocking new stages as you earn stars.
-* **Global Leaderboard:** Compete against other players worldwide. Your total score is recorded permanently on the Solana blockchain.
+* **Special Candies:**
+  - **Match 4** → Rocket (clears an entire row or column)
+  - **Match 2×2 square** → Lightning (strikes 5 random tiles)
+  - **T/L shape** (two intersecting lines of 3) → Bomb (3×3 explosion)
+  - **Match 5+** → Rainbow (clears all tiles of one color)
+* **Special Combos:** Swap two specials together for devastating chain effects.
+* **Interactive World Map:** Progress through 6 unique candy-themed levels with different board shapes.
+* **Global Leaderboard:** On-chain leaderboard — fetched directly from Solana via `getProgramAccounts()`.
 
-## 🚀 Blockchain Integration & MagicBlock Technology
+### Scoring System
+| Action | Points | Combo Multiplier |
+|--------|--------|------------------|
+| Match 3 tiles | 10 per tile | ✅ ×combo |
+| Create Rocket (match 4) | +20 bonus | ✅ |
+| Create Lightning (2×2) | +15 bonus | ✅ |
+| Create Bomb (T/L shape) | +25 bonus | ✅ |
+| Create Rainbow (match 5+) | +50 bonus | ✅ |
+| Special activation (in match) | 15 per tile | ✅ |
+| Special combo (swap two specials) | 20 per tile | — |
 
-Candy Blitz isn't just a Web2 game with a wallet login. It uses a custom **Anchor Smart Contract** deployed on Solana Devnet to manage player profiles and scoring securely.
+## 🚀 MagicBlock Ephemeral Rollups Integration
 
-### 1. Persistent On-Chain Player Accounts (PDAs)
-When a player connects their wallet (Phantom, Solflare, Backpack) and completes their first level, the game creates a Program Derived Address (PDA) specifically for that player. 
-* **Data Stored:** Total Score, Best Single-Game Score, Total Games Played, and Last Completed Level.
-* **Global Leaderboard:** The game's leaderboard doesn't rely on a centralized database. It fetches all `PlayerAccount` PDAs directly from the Solana network using `getProgramAccounts()` and ranks them dynamically in the browser.
+Candy Blitz uses **MagicBlock's Ephemeral Rollups** for real-time on-chain gameplay. The full lifecycle:
 
-### 2. MagicBlock Ephemeral Rollups (ER) SDK integration
-Casual games require fast, friction-free interactions. Waiting for a wallet popup and standard blockchain finality on *every single move* or *swap* destroys the gameplay experience. 
+```
+┌─────────────┐     ┌────────────────┐     ┌──────────────┐     ┌─────────────┐
+│  Delegate   │────▶│  Play on ER    │────▶│   Commit +   │────▶│  Devnet     │
+│  PDA → ER   │     │  (sub-second)  │     │  Undelegate  │     │  (settled)  │
+└─────────────┘     └────────────────┘     └──────────────┘     └─────────────┘
+  1 wallet sign       0 wallet signs         1 wallet sign        Score on-chain
+```
 
-Candy Blitz solves this using **MagicBlock's Ephemeral Rollups SDK**:
-* **The Problem:** Traditional Web3 games force players to sign transactions constantly or abstract the blockchain entirely until the end of a session.
-* **The MagicBlock Solution:** MagicBlock's ER technology allows the game to **delegate** the player's account state from the Solana base layer to a high-throughput Ephemeral Rollup validator.
-* **How it works in Candy Blitz (Architecture Preparation):** 
-  The Rust smart contract (`lib.rs`) is built with the `ephemeral-rollups-sdk`. It uses macros like `#[delegate]` and `#[commit]` which seamlessly inject the necessary MagicBlock instruction data. 
-  While the current iteration logs individual swaps locally and commits the final score in a single transaction to prevent UI freezing, the contract is fully structured to support active ER delegation. This means in an ER-active environment, every single swap could theoretically be processed on the Ephemeral Rollup with sub-second finality and zero wallet popups, before ultimately settling the final parsed score back to the Solana base layer via `commit`.
+### How It Works
+1. **Start Level** → Player PDA is delegated from Devnet to MagicBlock ER validator
+2. **During Gameplay** → Swaps are recorded on the ER with sub-second finality, zero wallet popups
+3. **End Level** → Score is committed and PDA is undelegated back to Devnet
+4. **Fallback** → If ER is unavailable, scores submit directly to Devnet
+
+### On-Chain Player Accounts (PDAs)
+Each player has a PDA storing:
+- **Per-level best scores** (6 levels × u64)
+- **Per-level stars** (6 levels × u8)
+- **Completed levels bitmask** (u8)
+- **Total games played** (u32)
+- **ER session state** (current_score, swap_count, session_active)
+
+### Smart Contract Instructions
+| Instruction | Layer | Description |
+|-------------|-------|-------------|
+| `initialize_player` | Devnet | Creates the player's PDA |
+| `submit_score` | Devnet | Updates scores (fallback, no ER) |
+| `delegate_player` | Devnet | Delegates PDA to ER validator |
+| `start_session` | ER | Starts a game session on ER |
+| `record_swap` | ER | Records a swap (fire-and-forget) |
+| `submit_score_and_commit` | ER | Commits score back to Devnet |
+| `undelegate_player` | ER | Returns PDA to Devnet |
 
 ## 🛠️ Technology Stack
-* **Frontend:** Vanilla HTML5, CSS3, JavaScript (No heavy frameworks, highly optimized for performance).
+* **Frontend:** Vanilla HTML5, CSS3, JavaScript (no frameworks)
 * **Smart Contract:** Rust, Anchor Framework v0.32.1
-* **Blockchain Connections:** `@solana/web3.js`
-* **ER Framework:** `ephemeral-rollups-sdk v0.6.5`
+* **Blockchain:** Solana Devnet via `@solana/web3.js`
+* **ER Framework:** `ephemeral-rollups-sdk v0.8.5`
+* **Program ID:** `CbYNU3N29sGLTDRexxzeu1NDzNg2DS3bUonxT7xH8MXH`
+* **ER Endpoint:** `https://devnet-eu.magicblock.app`
+* **Delegation Program:** `DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh`
 
 ## 📂 Project Structure
 ```text
 magicblock/
 ├── game/                        # Frontend Application
 │   ├── index.html               # Main entry point & UI structure
-│   ├── game-main.js & .css      # Game UI logic, DOM manipulation, animations
-│   ├── blockchain.js            # Solana/Anchor interactions & Leaderboard fetching
+│   ├── game-main.js & .css      # Game logic, DOM, animations
+│   ├── blockchain.js            # Solana/Anchor/ER interactions
 │   ├── config.js                # Game levels and constants
-│   ├── effects.js & audio.js    # Particle systems, fireworks, SFX
-│   └── vercel.json              # Vercel deployment configuration
+│   ├── effects.js & audio.js    # Particle systems, SFX
+│   └── storage.js               # localStorage wrapper
 │
 └── candy_blitz/                 # Solana Smart Contract
-    ├── Anchor.toml              # Anchor configuration & Program ID
-    └── programs/candy-blitz/src/lib.rs # Rust contract logic (Initialize, Submit Score, Delegate)
+    ├── Anchor.toml              # Anchor config & Program ID
+    ├── Cargo.toml               # Dependencies (anchor-lang, ephemeral-rollups-sdk)
+    └── programs/candy-blitz/
+        └── src/lib.rs           # Contract: Initialize, Score, Delegate, Session, Commit
 ```
 
 ## 🎮 How to Play Locally
 
 1. **Clone the repository.**
 2. **Serve the frontend:**
-   Since this is a vanilla HTML/JS app, you just need a local static server to avoid CORS issues with ES Modules.
    ```bash
    cd game
    npx http-server . -p 8080 -c-1
    ```
 3. Open `http://localhost:8080` in your browser.
 4. **Connect a Wallet:** Use Phantom or Solflare on **Devnet**.
-5. Play a level and watch your score get submitted to the blockchain!
+5. Play a level — delegation happens automatically before the timer starts!
 
 ## 🌐 Deployment (Vercel)
-The project includes a `vercel.json` file tailored for SPA static hosting. To deploy:
 1. Push your code to GitHub.
 2. Import the repository into Vercel.
-3. Set the **Root Directory** to `game` in the Vercel project settings.
-4. Deploy! No build commands are required.
+3. Set the **Root Directory** to `game`.
+4. Deploy — no build commands required.
 
-## 📝 Smart Contract Instructions
-* `initialize_player`: Creates the player's PDA on the base layer.
-* `submit_score`: Updates the player's PDA with the latest score, recalculating the total, best score, and game count.
-* `delegate_player`: (MagicBlock ER) Moves the player account control to the Ephemeral Rollup.
-* `submit_and_undelegate`: (MagicBlock ER) Submits final rollup state and returns control to the base layer.
+## 📝 License
+MIT

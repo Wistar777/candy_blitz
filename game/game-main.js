@@ -3,7 +3,7 @@ import { Storage } from './storage.js';
 import { STAR_THRESHOLDS, LEVELS, GRID, HINT_DELAY, CANDY_TILES } from './config.js';
 import { initAudio, playSound, startMusic, stopMusic, toggleMusic, changeVolume, changeSfxVolume, getMusicVolume, getSfxVolume } from './audio.js';
 import { showCombo, spawnRocketTrail, spawnBombShockwave, spawnRainbowWave, spawnLightningEffect, spawnGodRays, spawnLightBurst, showCinematicVignette, showScreenTint, boardCinematicZoom, showCompliment, spawnParticles, showScorePopup, createConfetti, startFireworks, stopFireworks } from './effects.js';
-import { initBlockchain, connectWallet, disconnectWallet, submitScore, isConnected, getWalletAddress, onWalletConnect, onWalletDisconnect, openProfile, getWalletStorageKey, tryAutoReconnect, fetchLeaderboard, getWalletBalance, startGameSession, recordSwap } from './blockchain.js';
+import { initBlockchain, connectWallet, disconnectWallet, submitScore, isConnected, getWalletAddress, onWalletConnect, onWalletDisconnect, openProfile, getWalletStorageKey, tryAutoReconnect, fetchLeaderboard, getWalletBalance, startGameSession, recordSwap, delegatePlayerAccount, startSessionOnER, recordSwapOnER, commitAndUndelegate, fetchPlayerProgress, waitForPDASettlement } from './blockchain.js';
 
 // Expose globals for HTML inline events
 window.openSettings = openSettings;
@@ -55,7 +55,6 @@ window.openLeaderboard = async function () {
                 <span class="lb-rank">${rank}</span>
                 <span class="lb-player" style="${nameStyle}" title="${entry.player}">${shortAddr}${meTag}</span>
                 <span class="lb-score">${entry.totalScore.toLocaleString()}</span>
-                <span class="lb-stars" title="Games: ${entry.gamesPlayed}">🎮 ${entry.gamesPlayed}</span>
             `;
             table.appendChild(row);
             rank++;
@@ -75,7 +74,6 @@ window.openLeaderboard = async function () {
                 <span class="lb-rank">${myRank}</span>
                 <span class="lb-player" style="color: #14F195; font-weight: 700;" title="${myEntry.player}">${shortAddr} (you)</span>
                 <span class="lb-score">${myEntry.totalScore.toLocaleString()}</span>
-                <span class="lb-stars" title="Games: ${myEntry.gamesPlayed}">🎮 ${myEntry.gamesPlayed}</span>
             `;
             table.appendChild(myRow);
         }
@@ -115,9 +113,49 @@ onWalletConnect(() => {
         mapBtn.title = getWalletAddress();
         mapBtn.classList.remove('wallet-reconnecting');
     }
-    // Load wallet-specific progress
+    // Load wallet-specific progress (localStorage first, then on-chain)
     loadWalletProgress();
     renderMap();
+
+    // Restore progress from on-chain (overrides localStorage if newer)
+    (async () => {
+        try {
+            const progress = await fetchPlayerProgress();
+            if (progress) {
+                // Restore best scores from on-chain
+                let updated = false;
+                for (let i = 0; i < LEVELS.length && i < progress.bestScores.length; i++) {
+                    const levelId = LEVELS[i].id;
+                    const onChainScore = progress.bestScores[i];
+                    const onChainStars = progress.stars[i];
+                    if (onChainScore > (bestScores[levelId] || 0)) {
+                        bestScores[levelId] = onChainScore;
+                        updated = true;
+                    }
+                    if (onChainStars > (bestStars[levelId] || 0)) {
+                        bestStars[levelId] = onChainStars;
+                        updated = true;
+                    }
+                    // Restore completed levels from bitmask
+                    if ((progress.completedLevels & (1 << i)) !== 0) {
+                        if (!completedLevels.includes(levelId)) {
+                            completedLevels.push(levelId);
+                            updated = true;
+                        }
+                    }
+                }
+                if (updated) {
+                    Storage.save(storageKey('bestScores'), bestScores);
+                    Storage.save(storageKey('bestStars'), bestStars);
+                    Storage.save(storageKey('completed'), completedLevels);
+                    renderMap();
+                    console.log('[Progress] 📊 Synced on-chain progress to local');
+                }
+            }
+        } catch (e) {
+            console.warn('[Progress] On-chain sync failed (using local):', e);
+        }
+    })();
 });
 
 // Callback: runs after wallet disconnects
@@ -771,25 +809,69 @@ function startLevel(levelIndex) {
 
     initBoard();
     createBoardDOM();
+
+    // Show the game screen with ER loading overlay
+    const erOverlay = document.getElementById('erLoadingOverlay');
+    const erText = document.getElementById('erLoadingText');
+    erOverlay.classList.remove('hidden');
+    erText.textContent = '⏳ Connecting to MagicBlock ER...';
+    busy = true; // Block board interactions
+
     showScreen('gameScreen');
 
-    // Timer
-    if (timerInterval) clearInterval(timerInterval);
-    timerInterval = setInterval(() => {
-        timeLeft--;
-        document.getElementById('timer').textContent = formatTime(timeLeft);
-        if (timeLeft <= 15) {
-            document.getElementById('timerBox').classList.add('warning');
-            if (timeLeft === 15) playSound('timer-warning');
-        }
-        if (timeLeft <= 0) {
-            clearInterval(timerInterval);
-            endGame();
-        }
-    }, 1000);
+    // Await ER delegation (with 10s timeout), THEN start the timer
+    (async () => {
+        let erReady = false;
+        try {
+            const erPromise = (async () => {
+                erText.textContent = '⏳ Delegating account — approve in wallet...';
+                const delegated = await delegatePlayerAccount();
+                if (delegated) {
+                    erText.textContent = '⚡ Starting session — approve in wallet...';
+                    await startSessionOnER(levelIndex);
+                    return true;
+                }
+                return false;
+            })();
 
-    startMusic();
-    resetHintTimer();
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('ER timeout')), 30000)
+            );
+
+            erReady = await Promise.race([erPromise, timeoutPromise]);
+        } catch (e) {
+            console.warn('[MagicBlock] ER setup failed/timed out, using Devnet fallback:', e.message);
+        }
+
+        // Hide overlay and start the game
+        erOverlay.classList.add('hidden');
+        busy = false;
+
+        if (erReady) {
+            erText.textContent = '✅ Connected!';
+            console.log('[MagicBlock] ⚡ ER session ready — game starting!');
+        } else {
+            console.log('[MagicBlock] ⚠️ Fallback to Devnet — game starting without ER');
+        }
+
+        // NOW start the timer
+        if (timerInterval) clearInterval(timerInterval);
+        timerInterval = setInterval(() => {
+            timeLeft--;
+            document.getElementById('timer').textContent = formatTime(timeLeft);
+            if (timeLeft <= 15) {
+                document.getElementById('timerBox').classList.add('warning');
+                if (timeLeft === 15) playSound('timer-warning');
+            }
+            if (timeLeft <= 0) {
+                clearInterval(timerInterval);
+                endGame();
+            }
+        }, 1000);
+
+        startMusic();
+        resetHintTimer();
+    })();
 }
 
 function retryLevel() {
@@ -1023,7 +1105,7 @@ function clickTile(r, c) {
                     for (const key of cleared) {
                         const [rr, cc] = key.split(',').map(Number);
                         if (board[rr][cc] !== null) {
-                            pts += 10;
+                            pts += 12;
                             const tile = getTile(rr, cc);
                             if (tile) {
                                 tile.classList.add('matched', 'glowing');
@@ -1124,9 +1206,12 @@ async function trySwap(r1, c1, r2, c2) {
     }
 
     if (getMatches().length > 0) {
-        // Record this swap on MagicBlock ER (fire-and-forget, non-blocking)
+        // Record swap locally + on ER (fire-and-forget, no wallet popup — signed with ephemeral keypair)
         recordSwap(r1, c1, r2, c2, 0);
+        const scoreBefore = score;
         await processMatches({ r1, c1, r2, c2 });
+        const scoreDelta = score - scoreBefore;
+        if (scoreDelta > 0) recordSwapOnER(scoreDelta);
     } else {
         // Swap back with animation
         const t1 = getTile(r1, c1);
@@ -1275,7 +1360,7 @@ async function processMatches(swapPos) {
             } else if (group.len === 4 && group.dir !== 'square') {
                 specialType = group.dir === 'h' ? 'rocket-v' : 'rocket-h';
             } else if (group.dir === 'square') {
-                specialType = 'bomb';
+                specialType = 'lightning';
             }
 
             if (specialType) {
@@ -1301,7 +1386,7 @@ async function processMatches(swapPos) {
             }
         }
 
-        // T/L shape detection: two 3-groups (one H, one V) sharing a cell → lightning
+        // T/L shape detection: two 3-groups (one H, one V) sharing a cell → bomb
         const hGroups3 = groups.filter(g => g.len === 3 && g.dir === 'h');
         const vGroups3 = groups.filter(g => g.len === 3 && g.dir === 'v');
         for (const hg of hGroups3) {
@@ -1314,7 +1399,7 @@ async function processMatches(swapPos) {
                             if (!protectedCells.has(key)) {
                                 // Check same tile type
                                 if (board[hg.cells[0].r][hg.cells[0].c] === board[vg.cells[0].r][vg.cells[0].c]) {
-                                    specialCreations.push({ r: hc.r, c: hc.c, type: 'lightning' });
+                                    specialCreations.push({ r: hc.r, c: hc.c, type: 'bomb' });
                                     protectedCells.add(key);
                                 }
                             }
@@ -1333,8 +1418,17 @@ async function processMatches(swapPos) {
             }
         }
 
-        // Score
-        const pts = Math.round(allMatched.length * 10 * (combo > 1 ? 1.5 * combo : 1));
+        // Score: base match + bonus for creating specials
+        const comboMult = combo > 1 ? 1.5 * combo : 1;
+        let basePts = allMatched.length * 10;
+        // Bonus for special creations
+        for (const sc of specialCreations) {
+            if (sc.type === 'rainbow') basePts += 50;
+            else if (sc.type === 'bomb') basePts += 25;
+            else if (sc.type === 'rocket-h' || sc.type === 'rocket-v') basePts += 20;
+            else if (sc.type === 'lightning') basePts += 15;
+        }
+        const pts = Math.round(basePts * comboMult);
         score += pts;
         document.getElementById('score').textContent = score;
         updateProgressBar();
@@ -1411,7 +1505,7 @@ async function processMatches(swapPos) {
             for (const key of extraCleared) {
                 const [rr, cc] = key.split(',').map(Number);
                 if (board[rr][cc] !== null) {
-                    extraPts += 8;
+                    extraPts += 15;
                     const tile = getTile(rr, cc);
                     if (tile) {
                         tile.classList.add('matched', 'glowing');
@@ -1423,6 +1517,7 @@ async function processMatches(swapPos) {
                 }
             }
             if (extraPts > 0) {
+                extraPts = Math.round(extraPts * comboMult);
                 score += extraPts;
                 document.getElementById('score').textContent = score;
                 updateProgressBar();
@@ -1494,7 +1589,7 @@ function collectSpecialEffect(r, c, type, clearedSet) {
             spawnRainbowWave(r, c);
             break;
         case 'lightning':
-            // Strike 3 random non-empty tiles
+            // Strike 5 random non-empty tiles
             const candidates = [];
             for (let rr = 0; rr < GRID; rr++) {
                 for (let cc = 0; cc < GRID; cc++) {
@@ -1505,7 +1600,8 @@ function collectSpecialEffect(r, c, type, clearedSet) {
                 const j = Math.floor(Math.random() * (i + 1));
                 [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
             }
-            const strikes = candidates.slice(0, 3);
+            const strikes = candidates.slice(0, 5);
+            console.log(`[Lightning] ⚡ Striking ${strikes.length} tiles from ${candidates.length} candidates:`, strikes);
             strikes.forEach(k => clearedSet.add(k));
             spawnLightningEffect(r, c, strikes);
             break;
@@ -1566,6 +1662,23 @@ async function activateRainbow(r, c, targetType) {
     await sleep(300);
 }
 
+// Immediately clear tiles visually during staged combos
+function clearTilesVisually(clearedSet) {
+    for (const key of clearedSet) {
+        const [r, c] = key.split(',').map(Number);
+        if (board[r]?.[c] !== null && board[r]?.[c] !== undefined) {
+            const tile = getTile(r, c);
+            if (tile) {
+                tile.classList.add('matched', 'glowing');
+                const rect = tile.getBoundingClientRect();
+                spawnParticles(rect.left + rect.width / 2, rect.top + rect.height / 2, 1);
+            }
+            board[r][c] = null;
+            specials[r][c] = null;
+        }
+    }
+}
+
 async function activateSpecialCombo(r1, c1, r2, c2, s1, s2) {
     const cleared = new Set();
     if (s1 === 'rainbow' && s2 === 'rainbow') {
@@ -1583,12 +1696,51 @@ async function activateSpecialCombo(r1, c1, r2, c2, s1, s2) {
         const targetType = board[otherR][otherC];
         spawnRainbowWave(rainR, rainC);
         if (targetType !== null) {
+            // Collect all tiles of this color
+            const colorTiles = [];
             for (let r = 0; r < GRID; r++)
                 for (let c = 0; c < GRID; c++)
-                    if (board[r][c] === targetType) {
-                        cleared.add(`${r},${c}`);
-                        collectSpecialEffect(r, c, otherType, cleared);
+                    if (board[r][c] === targetType) colorTiles.push({ r, c });
+
+            if (otherType && otherType !== 'rainbow') {
+                // Staged: place specials visually, then detonate one by one
+                await sleep(200);
+                // Step 1: Place specials visually on all color-matched tiles
+                const rocketDirs = []; // for rockets, pre-generate directions
+                for (const t of colorTiles) {
+                    let sType = otherType;
+                    if (otherType === 'rocket-h' || otherType === 'rocket-v') {
+                        sType = Math.random() < 0.5 ? 'rocket-h' : 'rocket-v';
                     }
+                    rocketDirs.push(sType);
+                    specials[t.r][t.c] = sType;
+                    previousSpecials[t.r][t.c] = null;
+                }
+                updateBoard(false);
+                await sleep(500);
+                // Step 2: Detonate one by one with 150ms gaps — clear tiles immediately
+                for (let i = 0; i < colorTiles.length; i++) {
+                    const t = colorTiles[i];
+                    const sType = rocketDirs[i];
+                    const before = new Set(cleared);
+                    specials[t.r][t.c] = null;
+                    cleared.add(`${t.r},${t.c}`);
+                    collectSpecialEffect(t.r, t.c, sType, cleared);
+                    if (sType === 'bomb') spawnBombShockwave(t.r, t.c);
+                    else if (sType === 'rocket-h') spawnRocketTrail(t.r, t.c, 'h');
+                    else if (sType === 'rocket-v') spawnRocketTrail(t.r, t.c, 'v');
+                    else if (sType === 'lightning') spawnLightningEffect(t.r, t.c,
+                        [...cleared].filter(k => { const [rr, cc] = k.split(',').map(Number); return board[rr]?.[cc] !== null; }).slice(0, 3));
+                    // Immediately clear newly added tiles visually
+                    const newlyCleared = new Set([...cleared].filter(k => !before.has(k)));
+                    clearTilesVisually(newlyCleared);
+                    playSound('match');
+                    await sleep(150);
+                }
+            } else {
+                // Rainbow + normal tile: just clear all of that color
+                for (const t of colorTiles) cleared.add(`${t.r},${t.c}`);
+            }
         }
     } else if ((s1 === 'rocket-h' || s1 === 'rocket-v') && (s2 === 'rocket-h' || s2 === 'rocket-v')) {
         // Rocket + Rocket = cross (full row + full column)
@@ -1624,7 +1776,7 @@ async function activateSpecialCombo(r1, c1, r2, c2, s1, s2) {
         spawnRocketTrail(centerR, centerC, 'h');
         spawnRocketTrail(centerR, centerC, 'v');
     } else if (s1 === 'lightning' && s2 === 'lightning') {
-        // Lightning + Lightning = 12 random strikes
+        // Lightning + Lightning = 15 random strikes
         const cands = [];
         for (let r = 0; r < GRID; r++)
             for (let c = 0; c < GRID; c++)
@@ -1633,12 +1785,12 @@ async function activateSpecialCombo(r1, c1, r2, c2, s1, s2) {
             const j = Math.floor(Math.random() * (i + 1));
             [cands[i], cands[j]] = [cands[j], cands[i]];
         }
-        const hits = cands.slice(0, 12);
+        const hits = cands.slice(0, 15);
         hits.forEach(k => cleared.add(k));
-        spawnLightningEffect(r1, c1, hits.slice(0, 6));
-        spawnLightningEffect(r2, c2, hits.slice(6));
+        spawnLightningEffect(r1, c1, hits.slice(0, 8));
+        spawnLightningEffect(r2, c2, hits.slice(8));
     } else if ((s1 === 'lightning' || s2 === 'lightning') && (s1 === 'bomb' || s2 === 'bomb')) {
-        // Lightning + Bomb = strike 3 random tiles, spawn bombs there, activate them
+        // Lightning + Bomb = strike 3 tiles → place bombs → detonate one by one
         const lightR = s1 === 'lightning' ? r1 : r2;
         const lightC = s1 === 'lightning' ? c1 : c2;
         const cands = [];
@@ -1651,15 +1803,31 @@ async function activateSpecialCombo(r1, c1, r2, c2, s1, s2) {
             [cands[i], cands[j]] = [cands[j], cands[i]];
         }
         const targets = cands.slice(0, 3);
+        // Step 1: Lightning bolts strike
         spawnLightningEffect(lightR, lightC, targets);
-        // Place bombs and activate them
-        targets.forEach(k => {
+        await sleep(200);
+        // Step 2: Place bombs visually on struck tiles
+        for (const k of targets) {
             const [tr, tc] = k.split(',').map(Number);
+            specials[tr][tc] = 'bomb';
+            previousSpecials[tr][tc] = null; // force visual update
+        }
+        updateBoard(false);
+        await sleep(500);
+        // Step 3: Detonate bombs one by one — clear tiles immediately
+        for (const k of targets) {
+            const [tr, tc] = k.split(',').map(Number);
+            const before = new Set(cleared);
+            specials[tr][tc] = null;
             collectSpecialEffect(tr, tc, 'bomb', cleared);
             spawnBombShockwave(tr, tc);
-        });
+            const newlyCleared = new Set([...cleared].filter(k2 => !before.has(k2)));
+            clearTilesVisually(newlyCleared);
+            playSound('match');
+            await sleep(200);
+        }
     } else if ((s1 === 'lightning' || s2 === 'lightning') && (s1 === 'rocket-h' || s1 === 'rocket-v' || s2 === 'rocket-h' || s2 === 'rocket-v')) {
-        // Lightning + Rocket = strike 3 random tiles, spawn rockets there, activate them
+        // Lightning + Rocket = strike 3 tiles → place rockets → fire one by one
         const lightR = s1 === 'lightning' ? r1 : r2;
         const lightC = s1 === 'lightning' ? c1 : c2;
         const cands = [];
@@ -1672,14 +1840,31 @@ async function activateSpecialCombo(r1, c1, r2, c2, s1, s2) {
             [cands[i], cands[j]] = [cands[j], cands[i]];
         }
         const targets = cands.slice(0, 3);
+        // Pre-generate rocket directions
+        const rocketDirs = targets.map(() => Math.random() < 0.5 ? 'rocket-h' : 'rocket-v');
+        // Step 1: Lightning bolts strike
         spawnLightningEffect(lightR, lightC, targets);
-        // Place random rockets and activate them
-        targets.forEach(k => {
-            const [tr, tc] = k.split(',').map(Number);
-            const rocketDir = Math.random() < 0.5 ? 'rocket-h' : 'rocket-v';
-            collectSpecialEffect(tr, tc, rocketDir, cleared);
-            spawnRocketTrail(tr, tc, rocketDir === 'rocket-h' ? 'h' : 'v');
-        });
+        await sleep(200);
+        // Step 2: Place rockets visually on struck tiles
+        for (let i = 0; i < targets.length; i++) {
+            const [tr, tc] = targets[i].split(',').map(Number);
+            specials[tr][tc] = rocketDirs[i];
+            previousSpecials[tr][tc] = null; // force visual update
+        }
+        updateBoard(false);
+        await sleep(500);
+        // Step 3: Fire rockets one by one — clear tiles immediately
+        for (let i = 0; i < targets.length; i++) {
+            const [tr, tc] = targets[i].split(',').map(Number);
+            const before = new Set(cleared);
+            specials[tr][tc] = null;
+            collectSpecialEffect(tr, tc, rocketDirs[i], cleared);
+            spawnRocketTrail(tr, tc, rocketDirs[i] === 'rocket-h' ? 'h' : 'v');
+            const newlyCleared = new Set([...cleared].filter(k => !before.has(k)));
+            clearTilesVisually(newlyCleared);
+            playSound('match');
+            await sleep(200);
+        }
     } else {
         collectSpecialEffect(r1, c1, s1, cleared);
         collectSpecialEffect(r2, c2, s2, cleared);
@@ -1706,7 +1891,7 @@ async function activateSpecialCombo(r1, c1, r2, c2, s1, s2) {
     for (const key of cleared) {
         const [r, c] = key.split(',').map(Number);
         if (board[r][c] !== null) {
-            pts += 10;
+            pts += 20;
             const tile = getTile(r, c);
             if (tile) {
                 tile.classList.add('matched', 'glowing');
@@ -2035,7 +2220,7 @@ function updateProgressBar() {
 // ===== EFFECTS =====
 let comboFireTimeout = null;
 
-function endGame() {
+async function endGame() {
     if (gameEnded) return;
     gameEnded = true;
     clearInterval(timerInterval);
@@ -2063,9 +2248,6 @@ function endGame() {
         }
 
         saveBestScore(level.id, score);
-
-        // Submit score to blockchain (if wallet connected)
-        submitScore(currentLevelIndex, score, 0);
 
         // Update win screen
         document.getElementById('winScore').textContent = score;
@@ -2111,9 +2293,53 @@ function endGame() {
         winScreen.classList.add('win-animate');
         setTimeout(() => winScreen.classList.remove('win-animate'), 2000);
 
-        // If first full completion, replace "К карте" button behavior
+        // --- Blockchain transaction: block button until confirmed ---
+        const winMapBtn = document.getElementById('winMapBtn');
+        const txLoading = document.getElementById('winTxLoading');
+
+        if (isConnected()) {
+            winMapBtn.disabled = true;
+            winMapBtn.classList.add('btn-disabled');
+            txLoading.classList.remove('hidden');
+
+            try {
+                // Step 1: Commit score on ER + undelegate PDA (no wallet popup)
+                txLoading.querySelector('span').textContent = '⚡ Committing ER state...';
+                const erOk = await commitAndUndelegate(starCount);
+
+                if (erOk) {
+                    // Step 2: Wait for PDA to return to our program on Devnet
+                    txLoading.querySelector('span').textContent = '⏳ Settling to Devnet...';
+                    const settled = await waitForPDASettlement();
+
+                    if (settled) {
+                        // Step 3: Submit score to Devnet (1 wallet popup for leaderboard)
+                        txLoading.querySelector('span').textContent = '⏳ Saving score...';
+                        const txOk = await submitScore(currentLevelIndex, score, starCount);
+                        txLoading.querySelector('span').textContent = txOk ? 'Saved on-chain! ✅' : 'ER saved, Devnet pending ⚡';
+                    } else {
+                        txLoading.querySelector('span').textContent = 'Saved on ER! ⚡ (Devnet settling...)';
+                    }
+                } else {
+                    // ER failed — direct Devnet submit (PDA might not be delegated)
+                    txLoading.querySelector('span').textContent = '⏳ Saving score...';
+                    const fallbackOk = await submitScore(currentLevelIndex, score, starCount);
+                    txLoading.querySelector('span').textContent = fallbackOk ? 'Saved on-chain! ✅' : 'Could not save ⚠️';
+                }
+            } catch (e) {
+                console.error('[TX] Score submission error:', e);
+                txLoading.querySelector('span').textContent = 'Transaction failed ❌';
+            }
+
+            setTimeout(() => {
+                winMapBtn.disabled = false;
+                winMapBtn.classList.remove('btn-disabled');
+                txLoading.classList.add('hidden');
+            }, 1200);
+        }
+
+        // If first full completion, replace "To Map" button behavior
         if (pendingCongrats) {
-            const winMapBtn = winScreen.querySelector('.btn-gold');
             const originalOnclick = winMapBtn.onclick;
             winMapBtn.textContent = 'Next ➡️';
             winMapBtn.onclick = function () {
