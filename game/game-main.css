@@ -2936,39 +2936,8 @@ h2 {
     margin: 12px 0;
 }
 
-.btn-reset {
-    background: linear-gradient(135deg, #ff6b6b, #ee5a24);
-    color: white;
-    border: none;
-    padding: 10px 22px;
-    font-size: 0.9rem;
-    font-family: 'Comfortaa', cursive;
-    font-weight: 600;
-    border-radius: 25px;
-    cursor: pointer;
-    box-shadow: 0 4px 15px rgba(238, 90, 36, 0.3);
-    transition: all 0.3s ease;
-    display: block;
-    margin: 0 auto;
-}
 
-@media (hover: hover) {
-    .btn-reset:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(238, 90, 36, 0.4);
-    }
-}
 
-.btn-reset:active {
-    transform: translateY(0);
-}
-
-.settings-hint {
-    font-size: 0.7rem;
-    color: rgba(194, 24, 91, 0.6);
-    margin-top: 6px;
-    text-align: center;
-}
 
 /* Toggle switch */
 .toggle-switch {

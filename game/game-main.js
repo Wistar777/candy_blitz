@@ -11,7 +11,7 @@ window.changeVolume = function (val) { changeVolume(val); updateVolumeIcon(val);
 window.changeSfxVolume = function (val) { changeSfxVolume(val); updateSfxIcon(val); document.getElementById('sfxValue').textContent = val + '%'; playSound('select'); };
 window.showMap = showMap;
 window.backToMap = backToMap;
-window.resetProgress = resetProgress;
+
 window.openLeaderboard = async function () {
     showScreen('leaderboardScreen');
     const table = document.getElementById('leaderboardTable');
@@ -276,38 +276,7 @@ function updateSfxIcon(pct) {
     else icon.textContent = '🔊';
 }
 
-let resetConfirmTimeout = null;
 
-function resetProgress() {
-    const btn = document.getElementById('resetBtn');
-
-    if (btn.dataset.confirming === 'true') {
-        // Second click — actually reset
-        clearTimeout(resetConfirmTimeout);
-        Storage.clearAll();
-        completedLevels = [];
-        bestScores = {};
-        bestStars = {};
-        btn.textContent = '✅ Reset!';
-        btn.style.background = 'linear-gradient(135deg, #27ae60, #2ecc71)';
-        btn.dataset.confirming = 'false';
-        renderMap();
-        setTimeout(() => {
-            btn.textContent = '🗑️ Reset Progress';
-            btn.style.background = '';
-        }, 2000);
-    } else {
-        // First click — ask confirmation
-        btn.dataset.confirming = 'true';
-        btn.textContent = '⚠️ Confirm reset?';
-        btn.style.background = 'linear-gradient(135deg, #e74c3c, #c0392b)';
-        resetConfirmTimeout = setTimeout(() => {
-            btn.textContent = '🗑️ Reset Progress';
-            btn.style.background = '';
-            btn.dataset.confirming = 'false';
-        }, 3000);
-    }
-}
 
 // ===== FLOATING HEARTS =====
 let heartsInterval;
