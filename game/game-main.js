@@ -1160,11 +1160,13 @@ async function trySwap(r1, c1, r2, c2) {
     }
 
     // Rainbow swap: rainbow + any tile (no match needed)
+    // NOTE: s1/s2 are pre-swap specials; after swap(), positions are swapped.
+    // If s1 was rainbow at (r1,c1), after swap it's now at (r2,c2).
     if (s1 === 'rainbow' || s2 === 'rainbow') {
-        const rainbowR = s1 === 'rainbow' ? r1 : r2;
-        const rainbowC = s1 === 'rainbow' ? c1 : c2;
-        const targetR = s1 === 'rainbow' ? r2 : r1;
-        const targetC = s1 === 'rainbow' ? c2 : c1;
+        const rainbowR = s1 === 'rainbow' ? r2 : r1;
+        const rainbowC = s1 === 'rainbow' ? c2 : c1;
+        const targetR = s1 === 'rainbow' ? r1 : r2;
+        const targetC = s1 === 'rainbow' ? c1 : c2;
         const targetType = board[targetR][targetC];
         await activateRainbow(rainbowR, rainbowC, targetType);
         await processMatches();
@@ -1657,11 +1659,12 @@ async function activateSpecialCombo(r1, c1, r2, c2, s1, s2) {
         spawnRainbowWave(r1, c1);
         spawnGodRays();
     } else if (s1 === 'rainbow' || s2 === 'rainbow') {
+        // NOTE: s1/s2 are pre-swap; after swap(), positions are swapped
         const otherType = s1 === 'rainbow' ? s2 : s1;
-        const otherR = s1 === 'rainbow' ? r2 : r1;
-        const otherC = s1 === 'rainbow' ? c2 : c1;
-        const rainR = s1 === 'rainbow' ? r1 : r2;
-        const rainC = s1 === 'rainbow' ? c1 : c2;
+        const otherR = s1 === 'rainbow' ? r1 : r2;
+        const otherC = s1 === 'rainbow' ? c1 : c2;
+        const rainR = s1 === 'rainbow' ? r2 : r1;
+        const rainC = s1 === 'rainbow' ? c2 : c1;
         const targetType = board[otherR][otherC];
         spawnRainbowWave(rainR, rainC);
         if (targetType !== null) {
