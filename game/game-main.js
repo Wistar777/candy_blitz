@@ -1633,11 +1633,13 @@ async function activateRainbow(r, c, targetType) {
     await sleep(300);
 }
 
-// Immediately clear tiles visually during staged combos
+// Immediately clear tiles visually during staged combos — awards points inline
 function clearTilesVisually(clearedSet) {
+    let pts = 0;
     for (const key of clearedSet) {
         const [r, c] = key.split(',').map(Number);
         if (board[r]?.[c] !== null && board[r]?.[c] !== undefined) {
+            pts += 20;
             const tile = getTile(r, c);
             if (tile) {
                 tile.classList.add('matched', 'glowing');
@@ -1648,6 +1650,12 @@ function clearTilesVisually(clearedSet) {
             specials[r][c] = null;
         }
     }
+    if (pts > 0) {
+        score += pts;
+        document.getElementById('score').textContent = score;
+        updateProgressBar();
+    }
+    return pts;
 }
 
 async function activateSpecialCombo(r1, c1, r2, c2, s1, s2) {
