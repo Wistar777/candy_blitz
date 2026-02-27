@@ -5,8 +5,8 @@ export let musicPlaying = false;
 export let bgMusic = null;
 
 let sfxMasterGain = null;
-let musicVolume = Storage.load('loveJourneyVolume', 0.3);
-let sfxVolume = Storage.load('loveJourneySfxVolume', 0.7);
+let musicVolume = Storage.load('candyBlitz_volume', 0.3);
+let sfxVolume = Storage.load('candyBlitz_sfxVolume', 0.7);
 
 const soundBuffers = {};
 const soundCooldowns = {};
@@ -37,7 +37,7 @@ export function changeVolume(pct) {
     if (bgMusic) {
         bgMusic.volume = musicVolume;
     }
-    Storage.save('loveJourneyVolume', musicVolume);
+    Storage.save('candyBlitz_volume', musicVolume);
 }
 
 export function changeSfxVolume(pct) {
@@ -45,7 +45,7 @@ export function changeSfxVolume(pct) {
     if (sfxMasterGain) {
         sfxMasterGain.gain.value = sfxVolume;
     }
-    Storage.save('loveJourneySfxVolume', sfxVolume);
+    Storage.save('candyBlitz_sfxVolume', sfxVolume);
 }
 
 export function startMusic() {

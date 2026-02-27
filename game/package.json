@@ -1,7 +1,7 @@
 {
-  "name": "love-match-game",
+  "name": "candy-blitz",
   "version": "1.0.0",
-  "description": "Valentine's Day Match-3 Game for Sabina",
+  "description": "Candy Blitz — on-chain Match-3 game on Solana with MagicBlock ER",
   "scripts": {
     "start": "npx serve ."
   }

@@ -33,9 +33,9 @@ export const Storage = {
         localStorage.removeItem(key);
     },
     clearAll() {
-        this.remove('loveJourneyCompleted');
-        this.remove('loveJourneyBestScores');
-        this.remove('loveJourneyBestStars');
+        this.remove('candyBlitz_volume');
+        this.remove('candyBlitz_sfxVolume');
+        this.remove('hintsEnabled');
         this.remove('gameCompleted');
     }
 };
